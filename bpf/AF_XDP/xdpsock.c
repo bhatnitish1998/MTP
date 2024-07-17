@@ -68,11 +68,6 @@
 
 #define DEBUG_HEXDUMP 0
 
-#define VLAN_PRIO_MASK		0xe000 /* Priority Code Point */
-#define VLAN_PRIO_SHIFT		13
-#define VLAN_VID_MASK		0x0fff /* VLAN Identifier */
-#define VLAN_VID__DEFAULT	1
-#define VLAN_PRI__DEFAULT	0
 
 #define NSEC_PER_SEC		1000000000UL
 #define NSEC_PER_USEC		1000
@@ -88,13 +83,6 @@ typedef __u8  u8;
 static unsigned long prev_time;
 
 
-enum benchmark_type {
-	BENCH_RXDROP = 0,
-	BENCH_TXONLY = 1,
-	BENCH_L2FWD = 2,
-};
-
-static enum benchmark_type opt_bench = BENCH_L2FWD;
 static enum xdp_attach_mode opt_attach_mode = XDP_MODE_NATIVE;
 static const char *opt_if = "";
 static int opt_ifindex;
@@ -128,22 +116,6 @@ static int opt_schpolicy = SCHED_OTHER;
 static int opt_schprio = SCHED_PRI__DEFAULT;
 static struct xdp_program *xdp_prog;
 static bool load_xdp_prog;
-
-struct vlan_ethhdr {
-	unsigned char h_dest[6];
-	unsigned char h_source[6];
-	__be16 h_vlan_proto;
-	__be16 h_vlan_TCI;
-	__be16 h_vlan_encapsulated_proto;
-};
-
-#define PKTGEN_MAGIC 0xbe9be955
-struct pktgen_hdr {
-	__be32 pgh_magic;
-	__be32 seq_num;
-	__be32 tv_sec;
-	__be32 tv_usec;
-};
 
 struct xsk_ring_stats {
 	unsigned long rx_frags;
@@ -268,8 +240,7 @@ static void print_benchmark(bool running)
 {
 	const char *bench_str = "INVALID";
 
-	if (opt_bench == BENCH_L2FWD)
-		bench_str = "l2fwd";
+	bench_str = "l2fwd";
 
 	printf("%s:%d %s ", opt_if, opt_queue, bench_str);
 	if (opt_attach_mode == XDP_MODE_SKB)
@@ -648,180 +619,18 @@ static void hex_dump(void *pkt, size_t length, u64 addr)
 	printf("\n");
 }
 
-/*
- * This function code has been taken from
- * Linux kernel lib/checksum.c
- */
-static inline unsigned short from32to16(unsigned int x)
-{
-	/* add up 16-bit and 16-bit for 16+c bit */
-	x = (x & 0xffff) + (x >> 16);
-	/* add up carry.. */
-	x = (x & 0xffff) + (x >> 16);
-	return x;
-}
-
-/*
- * This function code has been taken from
- * Linux kernel lib/checksum.c
- */
-static unsigned int do_csum(const unsigned char *buff, int len)
-{
-	unsigned int result = 0;
-	int odd;
-
-	if (len <= 0)
-		goto out;
-	odd = 1 & (unsigned long)buff;
-	if (odd) {
-#ifdef __LITTLE_ENDIAN
-		result += (*buff << 8);
-#else
-		result = *buff;
-#endif
-		len--;
-		buff++;
-	}
-	if (len >= 2) {
-		if (2 & (unsigned long)buff) {
-			result += *(unsigned short *)buff;
-			len -= 2;
-			buff += 2;
-		}
-		if (len >= 4) {
-			const unsigned char *end = buff +
-						   ((unsigned int)len & ~3);
-			unsigned int carry = 0;
-
-			do {
-				unsigned int w = *(unsigned int *)buff;
-
-				buff += 4;
-				result += carry;
-				result += w;
-				carry = (w > result);
-			} while (buff < end);
-			result += carry;
-			result = (result & 0xffff) + (result >> 16);
-		}
-		if (len & 2) {
-			result += *(unsigned short *)buff;
-			buff += 2;
-		}
-	}
-	if (len & 1)
-#ifdef __LITTLE_ENDIAN
-		result += *buff;
-#else
-		result += (*buff << 8);
-#endif
-	result = from32to16(result);
-	if (odd)
-		result = ((result >> 8) & 0xff) | ((result & 0xff) << 8);
-out:
-	return result;
-}
-
-/*
- *	This is a version of ip_compute_csum() optimized for IP headers,
- *	which always checksum on 4 octet boundaries.
- *	This function code has been taken from
- *	Linux kernel lib/checksum.c
- */
-static inline __sum16 ip_fast_csum(const void *iph, unsigned int ihl)
-{
-	return (__sum16)~do_csum(iph, ihl * 4);
-}
-
-/*
- * Fold a partial checksum
- * This function code has been taken from
- * Linux kernel include/asm-generic/checksum.h
- */
-static inline __sum16 csum_fold(__wsum csum)
-{
-	u32 sum = (u32)csum;
-
-	sum = (sum & 0xffff) + (sum >> 16);
-	sum = (sum & 0xffff) + (sum >> 16);
-	return (__sum16)~sum;
-}
-
-/*
- * This function code has been taken from
- * Linux kernel lib/checksum.c
- */
-static inline u32 from64to32(u64 x)
-{
-	/* add up 32-bit and 32-bit for 32+c bit */
-	x = (x & 0xffffffff) + (x >> 32);
-	/* add up carry.. */
-	x = (x & 0xffffffff) + (x >> 32);
-	return (u32)x;
-}
-
-__wsum csum_tcpudp_nofold(__be32 saddr, __be32 daddr,
-			  __u32 len, __u8 proto, __wsum sum);
-
-/*
- * This function code has been taken from
- * Linux kernel lib/checksum.c
- */
-__wsum csum_tcpudp_nofold(__be32 saddr, __be32 daddr,
-			  __u32 len, __u8 proto, __wsum sum)
-{
-	unsigned long long s = (u32)sum;
-
-	s += (u32)saddr;
-	s += (u32)daddr;
-#ifdef __BIG_ENDIAN__
-	s += proto + len;
-#else
-	s += (proto + len) << 8;
-#endif
-	return (__wsum)from64to32(s);
-}
-
-/*
- * This function has been taken from
- * Linux kernel include/asm-generic/checksum.h
- */
-static inline __sum16
-csum_tcpudp_magic(__be32 saddr, __be32 daddr, __u32 len,
-		  __u8 proto, __wsum sum)
-{
-	return csum_fold(csum_tcpudp_nofold(saddr, daddr, len, proto, sum));
-}
-
-static inline u16 udp_csum(u32 saddr, u32 daddr, u32 len,
-			   u8 proto, u16 *udp_pkt)
-{
-	u32 csum = 0;
-	u32 cnt = 0;
-
-	/* udp hdr and data */
-	for (; cnt < len; cnt += 2)
-		csum += udp_pkt[cnt >> 1];
-
-	return csum_tcpudp_magic(saddr, daddr, len, proto, csum);
-}
 
 #define ETH_FCS_SIZE 4
 
 #define ETH_HDR_SIZE (sizeof(struct ethhdr))
-#define PKTGEN_HDR_SIZE (0)
 #define PKT_HDR_SIZE (ETH_HDR_SIZE + sizeof(struct iphdr) + \
-		      sizeof(struct udphdr) + PKTGEN_HDR_SIZE)
-#define PKTGEN_HDR_OFFSET (ETH_HDR_SIZE + sizeof(struct iphdr) + \
-			   sizeof(struct udphdr))
-#define PKTGEN_SIZE_MIN (PKTGEN_HDR_OFFSET + sizeof(struct pktgen_hdr) + \
-			 ETH_FCS_SIZE)
+		      sizeof(struct udphdr) )
 
 #define PKT_SIZE		(opt_pkt_size - ETH_FCS_SIZE)
 #define IP_PKT_SIZE		(PKT_SIZE - ETH_HDR_SIZE)
 #define UDP_PKT_SIZE		(IP_PKT_SIZE - sizeof(struct iphdr))
 #define UDP_PKT_DATA_SIZE	(UDP_PKT_SIZE - \
-				 (sizeof(struct udphdr) + PKTGEN_HDR_SIZE))
+				 (sizeof(struct udphdr)))
 
 
 static struct xsk_umem_info *xsk_configure_umem(void *buffer, u64 size)
@@ -981,7 +790,6 @@ static void usage(const char *prog)
 	fprintf(stderr, str, prog, XSK_UMEM__DEFAULT_FRAME_SIZE,
 		opt_batch_size, MIN_PKT_SIZE, MIN_PKT_SIZE,
 		MAX_PKT_SIZE, 
-		VLAN_VID__DEFAULT, VLAN_PRI__DEFAULT,
 		SCHED_PRI__DEFAULT);
 
 	exit(EXIT_FAILURE);
@@ -1175,32 +983,6 @@ static inline void complete_tx_l2fwd(struct xsk_socket_info *xsk)
 		xsk_ring_cons__release(&xsk->umem->cq, rcvd);
 		xsk->outstanding_tx -= rcvd;
 	}
-}
-
-static inline void complete_tx_only(struct xsk_socket_info *xsk,
-				    int batch_size)
-{
-	unsigned int rcvd;
-	u32 idx;
-
-	if (!xsk->outstanding_tx)
-		return;
-
-	if (!opt_need_wakeup || xsk_ring_prod__needs_wakeup(&xsk->tx)) {
-		xsk->app_stats.tx_wakeup_sendtos++;
-		kick_tx(xsk);
-	}
-
-	rcvd = xsk_ring_cons__peek(&xsk->umem->cq, batch_size, &idx);
-	if (rcvd > 0) {
-		xsk_ring_cons__release(&xsk->umem->cq, rcvd);
-		xsk->outstanding_tx -= rcvd;
-	}
-}
-
-static inline int get_batch_size(int pkt_cnt)
-{
-	return opt_batch_size * frames_per_pkt;
 }
 
 
@@ -1470,12 +1252,10 @@ int main(int argc, char **argv)
 
 	/* Create sockets... */
 	umem = xsk_configure_umem(bufs, NUM_FRAMES * opt_xsk_frame_size);
-	if (opt_bench == BENCH_L2FWD) {
-		rx = true;
-		xsk_populate_fill_ring(umem);
-	}
-	if (opt_bench == BENCH_L2FWD )
-		tx = true;
+
+	rx = true;
+	xsk_populate_fill_ring(umem);
+	tx = true;
 	for (i = 0; i < opt_num_xsks; i++)
 		xsks[num_socks++] = xsk_configure_socket(umem, rx, tx);
 
