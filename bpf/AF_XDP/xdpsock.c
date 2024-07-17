@@ -86,10 +86,7 @@ typedef __u16 u16;
 typedef __u8  u8;
 
 static unsigned long prev_time;
-static long tx_cycle_diff_min;
-static long tx_cycle_diff_max;
-static double tx_cycle_diff_ave;
-static long tx_cycle_cnt;
+
 
 enum benchmark_type {
 	BENCH_RXDROP = 0,
@@ -97,7 +94,7 @@ enum benchmark_type {
 	BENCH_L2FWD = 2,
 };
 
-static enum benchmark_type opt_bench = BENCH_RXDROP;
+static enum benchmark_type opt_bench = BENCH_L2FWD;
 static enum xdp_attach_mode opt_attach_mode = XDP_MODE_NATIVE;
 static const char *opt_if = "";
 static int opt_ifindex;
@@ -106,23 +103,13 @@ static unsigned long opt_duration;
 static unsigned long start_time;
 static bool benchmark_done;
 static u32 opt_batch_size = 64;
-static int opt_pkt_count;
 static u16 opt_pkt_size = MIN_PKT_SIZE;
-static u32 opt_pkt_fill_pattern = 0x12345678;
-static bool opt_vlan_tag;
-static u16 opt_pkt_vlan_id = VLAN_VID__DEFAULT;
-static u16 opt_pkt_vlan_pri = VLAN_PRI__DEFAULT;
-static struct ether_addr opt_txdmac = {{ 0x3c, 0xfd, 0xfe,
-					 0x9e, 0x7f, 0x71 }};
-static struct ether_addr opt_txsmac = {{ 0xec, 0xb1, 0xd7,
-					 0x98, 0x3a, 0xc0 }};
 static bool opt_extra_stats;
 static bool opt_quiet;
 static bool opt_app_stats;
 static const char *opt_irq_str = "";
 static u32 irq_no;
 static int irqs_at_init = -1;
-static u32 sequence;
 static int opt_poll;
 static int opt_interval = 1;
 static int opt_retries = 3;
@@ -138,10 +125,8 @@ static u32 opt_num_xsks = 1;
 static bool opt_busy_poll;
 static bool opt_reduced_cap;
 static clockid_t opt_clock = CLOCK_MONOTONIC;
-static unsigned long opt_tx_cycle_ns;
 static int opt_schpolicy = SCHED_OTHER;
 static int opt_schprio = SCHED_PRI__DEFAULT;
-static bool opt_tstamp;
 static struct xdp_program *xdp_prog;
 static bool opt_frags;
 static bool load_xdp_prog;
@@ -285,11 +270,7 @@ static void print_benchmark(bool running)
 {
 	const char *bench_str = "INVALID";
 
-	if (opt_bench == BENCH_RXDROP)
-		bench_str = "rxdrop";
-	else if (opt_bench == BENCH_TXONLY)
-		bench_str = "txonly";
-	else if (opt_bench == BENCH_L2FWD)
+	if (opt_bench == BENCH_L2FWD)
 		bench_str = "l2fwd";
 
 	printf("%s:%d %s ", opt_if, opt_queue, bench_str);
@@ -371,14 +352,7 @@ static void dump_app_stats(long dt)
 		xsks[i]->app_stats.prev_opt_polls = xsks[i]->app_stats.opt_polls;
 	}
 
-	if (opt_tx_cycle_ns) {
-		printf("\n%-18s %-10s %-10s %-10s %-10s %-10s\n",
-		       "", "period", "min", "ave", "max", "cycle");
-		printf("%-18s %-10lu %-10lu %-10lu %-10lu %-10lu\n",
-		       "Cyclic TX", opt_tx_cycle_ns, tx_cycle_diff_min,
-		       (long)(tx_cycle_diff_ave / tx_cycle_cnt),
-		       tx_cycle_diff_max, tx_cycle_cnt);
-	}
+
 }
 
 static bool get_interrupt_number(void)
@@ -696,22 +670,6 @@ static void hex_dump(void *pkt, size_t length, u64 addr)
 	printf("\n");
 }
 
-static void *memset32_htonl(void *dest, u32 val, u32 size)
-{
-	u32 *ptr = (u32 *)dest;
-	int i;
-
-	val = htonl(val);
-
-	for (i = 0; i < (size & (~0x3)); i += 4)
-		ptr[i >> 2] = val;
-
-	for (; i < size; i++)
-		((char *)dest)[i] = ((char *)&val)[i & 3];
-
-	return dest;
-}
-
 /*
  * This function code has been taken from
  * Linux kernel lib/checksum.c
@@ -872,9 +830,8 @@ static inline u16 udp_csum(u32 saddr, u32 daddr, u32 len,
 
 #define ETH_FCS_SIZE 4
 
-#define ETH_HDR_SIZE (opt_vlan_tag ? sizeof(struct vlan_ethhdr) : \
-		      sizeof(struct ethhdr))
-#define PKTGEN_HDR_SIZE (opt_tstamp ? sizeof(struct pktgen_hdr) : 0)
+#define ETH_HDR_SIZE (sizeof(struct ethhdr))
+#define PKTGEN_HDR_SIZE (0)
 #define PKT_HDR_SIZE (ETH_HDR_SIZE + sizeof(struct iphdr) + \
 		      sizeof(struct udphdr) + PKTGEN_HDR_SIZE)
 #define PKTGEN_HDR_OFFSET (ETH_HDR_SIZE + sizeof(struct iphdr) + \
@@ -888,102 +845,6 @@ static inline u16 udp_csum(u32 saddr, u32 daddr, u32 len,
 #define UDP_PKT_DATA_SIZE	(UDP_PKT_SIZE - \
 				 (sizeof(struct udphdr) + PKTGEN_HDR_SIZE))
 
-static u8 pkt_data[MAX_PKT_SIZE];
-
-static void gen_eth_hdr_data(void)
-{
-	struct pktgen_hdr *pktgen_hdr;
-	struct udphdr *udp_hdr;
-	struct iphdr *ip_hdr;
-
-	if (opt_vlan_tag) {
-		struct vlan_ethhdr *veth_hdr = (struct vlan_ethhdr *)pkt_data;
-		u16 vlan_tci = 0;
-
-		udp_hdr = (struct udphdr *)(pkt_data +
-					    sizeof(struct vlan_ethhdr) +
-					    sizeof(struct iphdr));
-		ip_hdr = (struct iphdr *)(pkt_data +
-					  sizeof(struct vlan_ethhdr));
-		pktgen_hdr = (struct pktgen_hdr *)(pkt_data +
-						   sizeof(struct vlan_ethhdr) +
-						   sizeof(struct iphdr) +
-						   sizeof(struct udphdr));
-		/* ethernet & VLAN header */
-		memcpy(veth_hdr->h_dest, &opt_txdmac, ETH_ALEN);
-		memcpy(veth_hdr->h_source, &opt_txsmac, ETH_ALEN);
-		veth_hdr->h_vlan_proto = htons(ETH_P_8021Q);
-		vlan_tci = opt_pkt_vlan_id & VLAN_VID_MASK;
-		vlan_tci |= (opt_pkt_vlan_pri << VLAN_PRIO_SHIFT) & VLAN_PRIO_MASK;
-		veth_hdr->h_vlan_TCI = htons(vlan_tci);
-		veth_hdr->h_vlan_encapsulated_proto = htons(ETH_P_IP);
-	} else {
-		struct ethhdr *eth_hdr = (struct ethhdr *)pkt_data;
-
-		udp_hdr = (struct udphdr *)(pkt_data +
-					    sizeof(struct ethhdr) +
-					    sizeof(struct iphdr));
-		ip_hdr = (struct iphdr *)(pkt_data +
-					  sizeof(struct ethhdr));
-		pktgen_hdr = (struct pktgen_hdr *)(pkt_data +
-						   sizeof(struct ethhdr) +
-						   sizeof(struct iphdr) +
-						   sizeof(struct udphdr));
-		/* ethernet header */
-		memcpy(eth_hdr->h_dest, &opt_txdmac, ETH_ALEN);
-		memcpy(eth_hdr->h_source, &opt_txsmac, ETH_ALEN);
-		eth_hdr->h_proto = htons(ETH_P_IP);
-	}
-
-
-	/* IP header */
-	ip_hdr->version = IPVERSION;
-	ip_hdr->ihl = 0x5; /* 20 byte header */
-	ip_hdr->tos = 0x0;
-	ip_hdr->tot_len = htons(IP_PKT_SIZE);
-	ip_hdr->id = 0;
-	ip_hdr->frag_off = 0;
-	ip_hdr->ttl = IPDEFTTL;
-	ip_hdr->protocol = IPPROTO_UDP;
-	ip_hdr->saddr = htonl(0x0a0a0a10);
-	ip_hdr->daddr = htonl(0x0a0a0a20);
-
-	/* IP header checksum */
-	ip_hdr->check = 0;
-	ip_hdr->check = ip_fast_csum((const void *)ip_hdr, ip_hdr->ihl);
-
-	/* UDP header */
-	udp_hdr->source = htons(0x1000);
-	udp_hdr->dest = htons(0x1000);
-	udp_hdr->len = htons(UDP_PKT_SIZE);
-
-	if (opt_tstamp)
-		pktgen_hdr->pgh_magic = htonl(PKTGEN_MAGIC);
-
-	/* UDP data */
-	memset32_htonl(pkt_data + PKT_HDR_SIZE, opt_pkt_fill_pattern,
-		       UDP_PKT_DATA_SIZE);
-
-	/* UDP header checksum */
-	udp_hdr->check = 0;
-	udp_hdr->check = udp_csum(ip_hdr->saddr, ip_hdr->daddr, UDP_PKT_SIZE,
-				  IPPROTO_UDP, (u16 *)udp_hdr);
-}
-
-static void gen_eth_frame(struct xsk_umem_info *umem, u64 addr)
-{
-	static u32 len;
-	u32 copy_len = opt_xsk_frame_size;
-
-	if (!len)
-		len = PKT_SIZE;
-
-	if (len < opt_xsk_frame_size)
-		copy_len = len;
-	memcpy(xsk_umem__get_data(umem->buffer, addr),
-			pkt_data + PKT_SIZE - len, copy_len);
-	len -= copy_len;
-}
 
 static struct xsk_umem_info *xsk_configure_umem(void *buffer, u64 size)
 {
@@ -1082,9 +943,6 @@ static struct xsk_socket_info *xsk_configure_socket(struct xsk_umem_info *umem,
 }
 
 static struct option long_options[] = {
-	{"rxdrop", no_argument, 0, 'r'},
-	{"txonly", no_argument, 0, 't'},
-	{"l2fwd", no_argument, 0, 'l'},
 	{"interface", required_argument, 0, 'i'},
 	{"queue", required_argument, 0, 'q'},
 	{"poll", no_argument, 0, 'p'},
@@ -1101,17 +959,7 @@ static struct option long_options[] = {
 	{"force", no_argument, 0, 'F'},
 	{"duration", required_argument, 0, 'd'},
 	{"clock", required_argument, 0, 'w'},
-	{"batch-size", required_argument, 0, 'b'},
-	{"tx-pkt-count", required_argument, 0, 'C'},
-	{"tx-pkt-size", required_argument, 0, 's'},
-	{"tx-pkt-pattern", required_argument, 0, 'P'},
-	{"tx-vlan", no_argument, 0, 'V'},
-	{"tx-vlan-id", required_argument, 0, 'J'},
-	{"tx-vlan-pri", required_argument, 0, 'K'},
-	{"tx-dmac", required_argument, 0, 'G'},
-	{"tx-smac", required_argument, 0, 'H'},
-	{"tx-cycle", required_argument, 0, 'T'},
-	{"tstamp", no_argument, 0, 'y'},
+	{"batch-size", required_argument, 0, 'b'},	
 	{"policy", required_argument, 0, 'W'},
 	{"schpri", required_argument, 0, 'U'},
 	{"extra-stats", no_argument, 0, 'x'},
@@ -1128,9 +976,6 @@ static void usage(const char *prog)
 	const char *str =
 		"  Usage: %s [OPTIONS]\n"
 		"  Options:\n"
-		"  -r, --rxdrop		Discard all incoming packets (default)\n"
-		"  -t, --txonly		Only send packets\n"
-		"  -l, --l2fwd		MAC swap L2 forwarding\n"
 		"  -i, --interface=n	Run on interface n\n"
 		"  -q, --queue=n	Use queue n (default 0)\n"
 		"  -p, --poll		Use poll syscall\n"
@@ -1149,19 +994,6 @@ static void usage(const char *prog)
 		"  -w, --clock=CLOCK	Clock NAME (default MONOTONIC).\n"
 		"  -b, --batch-size=n	Batch size for sending or receiving\n"
 		"			packets. Default: %d\n"
-		"  -C, --tx-pkt-count=n	Number of packets to send.\n"
-		"			Default: Continuous packets.\n"
-		"  -s, --tx-pkt-size=n	Transmit packet size.\n"
-		"			(Default: %d bytes)\n"
-		"			Min size: %d, Max size %d.\n"
-		"  -P, --tx-pkt-pattern=nPacket fill pattern. Default: 0x%x\n"
-		"  -V, --tx-vlan        Send VLAN tagged  packets (For -t|--txonly)\n"
-		"  -J, --tx-vlan-id=n   Tx VLAN ID [1-4095]. Default: %d (For -V|--tx-vlan)\n"
-		"  -K, --tx-vlan-pri=n  Tx VLAN Priority [0-7]. Default: %d (For -V|--tx-vlan)\n"
-		"  -G, --tx-dmac=<MAC>  Dest MAC addr of TX frame in aa:bb:cc:dd:ee:ff format (For -V|--tx-vlan)\n"
-		"  -H, --tx-smac=<MAC>  Src MAC addr of TX frame in aa:bb:cc:dd:ee:ff format (For -V|--tx-vlan)\n"
-		"  -T, --tx-cycle=n     Tx cycle time in micro-seconds (For -t|--txonly).\n"
-		"  -y, --tstamp         Add time-stamp to packet (For -t|--txonly).\n"
 		"  -W, --policy=POLICY  Schedule policy. Default: SCHED_OTHER\n"
 		"  -U, --schpri=n       Schedule priority. Default: %d\n"
 		"  -x, --extra-stats	Display extra statistics.\n"
@@ -1174,7 +1006,7 @@ static void usage(const char *prog)
 		"\n";
 	fprintf(stderr, str, prog, XSK_UMEM__DEFAULT_FRAME_SIZE,
 		opt_batch_size, MIN_PKT_SIZE, MIN_PKT_SIZE,
-		MAX_PKT_SIZE, opt_pkt_fill_pattern,
+		MAX_PKT_SIZE, 
 		VLAN_VID__DEFAULT, VLAN_PRI__DEFAULT,
 		SCHED_PRI__DEFAULT);
 
@@ -1189,21 +1021,12 @@ static void parse_command_line(int argc, char **argv)
 
 	for (;;) {
 		c = getopt_long(argc, argv,
-				"rtli:q:pSNn:w:O:czf:muMd:b:C:s:P:VJ:K:G:H:T:yW:U:xQaI:BRF",
+				"i:q:pSNn:w:O:czf:muMd:b:W:U:xQaI:BRF",
 				long_options, &option_index);
 		if (c == -1)
 			break;
 
 		switch (c) {
-		case 'r':
-			opt_bench = BENCH_RXDROP;
-			break;
-		case 't':
-			opt_bench = BENCH_TXONLY;
-			break;
-		case 'l':
-			opt_bench = BENCH_L2FWD;
-			break;
 		case 'i':
 			opt_if = optarg;
 			break;
@@ -1261,54 +1084,6 @@ static void parse_command_line(int argc, char **argv)
 			break;
 		case 'b':
 			opt_batch_size = atoi(optarg);
-			break;
-		case 'C':
-			opt_pkt_count = atoi(optarg);
-			break;
-		case 's':
-			opt_pkt_size = atoi(optarg);
-			if (opt_pkt_size > (MAX_PKT_SIZE) ||
-			    opt_pkt_size < MIN_PKT_SIZE) {
-				fprintf(stderr,
-					"ERROR: Invalid frame size %d\n",
-					opt_pkt_size);
-				usage(basename(argv[0]));
-			}
-			break;
-		case 'P':
-			opt_pkt_fill_pattern = strtol(optarg, NULL, 16);
-			break;
-		case 'V':
-			opt_vlan_tag = true;
-			break;
-		case 'J':
-			opt_pkt_vlan_id = atoi(optarg);
-			break;
-		case 'K':
-			opt_pkt_vlan_pri = atoi(optarg);
-			break;
-		case 'G':
-			if (!ether_aton_r(optarg,
-					  (struct ether_addr *)&opt_txdmac)) {
-				fprintf(stderr, "Invalid dmac address:%s\n",
-					optarg);
-				usage(basename(argv[0]));
-			}
-			break;
-		case 'H':
-			if (!ether_aton_r(optarg,
-					  (struct ether_addr *)&opt_txsmac)) {
-				fprintf(stderr, "Invalid smac address:%s\n",
-					optarg);
-				usage(basename(argv[0]));
-			}
-			break;
-		case 'T':
-			opt_tx_cycle_ns = atoi(optarg);
-			opt_tx_cycle_ns *= NSEC_PER_USEC;
-			break;
-		case 'y':
-			opt_tstamp = 1;
 			break;
 		case 'W':
 			if (get_schpolicy(&opt_schpolicy, optarg)) {
@@ -1459,261 +1234,11 @@ static inline void complete_tx_only(struct xsk_socket_info *xsk,
 	}
 }
 
-static void rx_drop(struct xsk_socket_info *xsk)
-{
-	unsigned int rcvd, i, eop_cnt = 0;
-	u32 idx_rx = 0, idx_fq = 0;
-	int ret;
-
-	rcvd = xsk_ring_cons__peek(&xsk->rx, opt_batch_size, &idx_rx);
-	if (!rcvd) {
-		if (opt_busy_poll || xsk_ring_prod__needs_wakeup(&xsk->umem->fq)) {
-			xsk->app_stats.rx_empty_polls++;
-			recvfrom(xsk_socket__fd(xsk->xsk), NULL, 0, MSG_DONTWAIT, NULL, NULL);
-		}
-		return;
-	}
-
-	ret = xsk_ring_prod__reserve(&xsk->umem->fq, rcvd, &idx_fq);
-	while (ret != rcvd) {
-		if (ret < 0)
-			exit_with_error(-ret);
-		if (opt_busy_poll || xsk_ring_prod__needs_wakeup(&xsk->umem->fq)) {
-			xsk->app_stats.fill_fail_polls++;
-			recvfrom(xsk_socket__fd(xsk->xsk), NULL, 0, MSG_DONTWAIT, NULL, NULL);
-		}
-		ret = xsk_ring_prod__reserve(&xsk->umem->fq, rcvd, &idx_fq);
-	}
-
-	for (i = 0; i < rcvd; i++) {
-		const struct xdp_desc *desc = xsk_ring_cons__rx_desc(&xsk->rx, idx_rx++);
-		u64 addr = desc->addr;
-		u32 len = desc->len;
-		u64 orig = xsk_umem__extract_addr(addr);
-		eop_cnt += IS_EOP_DESC(desc->options);
-
-		addr = xsk_umem__add_offset_to_addr(addr);
-		char *pkt = xsk_umem__get_data(xsk->umem->buffer, addr);
-
-		hex_dump(pkt, len, addr);
-		*xsk_ring_prod__fill_addr(&xsk->umem->fq, idx_fq++) = orig;
-	}
-
-	xsk_ring_prod__submit(&xsk->umem->fq, rcvd);
-	xsk_ring_cons__release(&xsk->rx, rcvd);
-	xsk->ring_stats.rx_npkts += eop_cnt;
-	xsk->ring_stats.rx_frags += rcvd;
-}
-
-static void rx_drop_all(void)
-{
-	struct pollfd fds[MAX_SOCKS] = {};
-	int i, ret;
-
-	for (i = 0; i < num_socks; i++) {
-		fds[i].fd = xsk_socket__fd(xsks[i]->xsk);
-		fds[i].events = POLLIN;
-	}
-
-	for (;;) {
-		if (opt_poll) {
-			for (i = 0; i < num_socks; i++)
-				xsks[i]->app_stats.opt_polls++;
-			ret = poll(fds, num_socks, opt_timeout);
-			if (ret <= 0)
-				continue;
-		}
-
-		for (i = 0; i < num_socks; i++)
-			rx_drop(xsks[i]);
-
-		if (benchmark_done)
-			break;
-	}
-}
-
-static int tx_only(struct xsk_socket_info *xsk, u32 *frame_nb,
-		   int batch_size, unsigned long tx_ns)
-{
-	u32 idx, tv_sec, tv_usec;
-	unsigned int i;
-
-	while (xsk_ring_prod__reserve(&xsk->tx, batch_size, &idx) <
-				      batch_size) {
-		complete_tx_only(xsk, batch_size);
-		if (benchmark_done)
-			return 0;
-	}
-
-	if (opt_tstamp) {
-		tv_sec = (u32)(tx_ns / NSEC_PER_SEC);
-		tv_usec = (u32)((tx_ns % NSEC_PER_SEC) / 1000);
-	}
-
-	for (i = 0; i < batch_size; ) {
-		u32 len = PKT_SIZE;
-
-		do {
-			struct xdp_desc *tx_desc = xsk_ring_prod__tx_desc(&xsk->tx,
-									  idx + i);
-			tx_desc->addr = *frame_nb * opt_xsk_frame_size;
-			if (len > opt_xsk_frame_size) {
-				tx_desc->len = opt_xsk_frame_size;
-				tx_desc->options = XDP_PKT_CONTD;
-			} else {
-				tx_desc->len = len;
-				tx_desc->options = 0;
-				xsk->ring_stats.tx_npkts++;
-			}
-			len -= tx_desc->len;
-			*frame_nb = (*frame_nb + 1) % NUM_FRAMES;
-			i++;
-
-			if (opt_tstamp) {
-				struct pktgen_hdr *pktgen_hdr;
-				u64 addr = tx_desc->addr;
-				char *pkt;
-
-				pkt = xsk_umem__get_data(xsk->umem->buffer, addr);
-				pktgen_hdr = (struct pktgen_hdr *)(pkt + PKTGEN_HDR_OFFSET);
-
-				pktgen_hdr->seq_num = htonl(sequence++);
-				pktgen_hdr->tv_sec = htonl(tv_sec);
-				pktgen_hdr->tv_usec = htonl(tv_usec);
-
-				hex_dump(pkt, PKT_SIZE, addr);
-			}
-		} while (len);
-	}
-
-	xsk_ring_prod__submit(&xsk->tx, batch_size);
-	xsk->outstanding_tx += batch_size;
-	xsk->ring_stats.tx_frags += batch_size;
-	complete_tx_only(xsk, batch_size);
-
-	return batch_size / frames_per_pkt;
-}
-
 static inline int get_batch_size(int pkt_cnt)
 {
-	if (!opt_pkt_count)
-		return opt_batch_size * frames_per_pkt;
-
-	if (pkt_cnt + opt_batch_size <= opt_pkt_count)
-		return opt_batch_size * frames_per_pkt;
-
-	return (opt_pkt_count - pkt_cnt) * frames_per_pkt;
+	return opt_batch_size * frames_per_pkt;
 }
 
-static void complete_tx_only_all(void)
-{
-	bool pending;
-	int i;
-
-	do {
-		pending = false;
-		for (i = 0; i < num_socks; i++) {
-			if (xsks[i]->outstanding_tx) {
-				complete_tx_only(xsks[i], opt_batch_size);
-				pending = !!xsks[i]->outstanding_tx;
-			}
-		}
-		sleep(1);
-	} while (pending && opt_retries-- > 0);
-}
-
-static void tx_only_all(void)
-{
-	struct pollfd fds[MAX_SOCKS] = {};
-	u32 frame_nb[MAX_SOCKS] = {};
-	unsigned long next_tx_ns = 0;
-	int pkt_cnt = 0;
-	int i, ret;
-
-	if (opt_poll && opt_tx_cycle_ns) {
-		fprintf(stderr,
-			"Error: --poll and --tx-cycles are both set\n");
-		return;
-	}
-
-	for (i = 0; i < num_socks; i++) {
-		fds[0].fd = xsk_socket__fd(xsks[i]->xsk);
-		fds[0].events = POLLOUT;
-	}
-
-	if (opt_tx_cycle_ns) {
-		/* Align Tx time to micro-second boundary */
-		next_tx_ns = (get_nsecs() / NSEC_PER_USEC + 1) *
-			     NSEC_PER_USEC;
-		next_tx_ns += opt_tx_cycle_ns;
-
-		/* Initialize periodic Tx scheduling variance */
-		tx_cycle_diff_min = 1000000000;
-		tx_cycle_diff_max = 0;
-		tx_cycle_diff_ave = 0.0;
-	}
-
-	while ((opt_pkt_count && pkt_cnt < opt_pkt_count) || !opt_pkt_count) {
-		int batch_size = get_batch_size(pkt_cnt);
-		unsigned long tx_ns = 0;
-		struct timespec next;
-		int tx_cnt = 0;
-		long diff;
-		int err;
-
-		if (opt_poll) {
-			for (i = 0; i < num_socks; i++)
-				xsks[i]->app_stats.opt_polls++;
-			ret = poll(fds, num_socks, opt_timeout);
-			if (ret <= 0)
-				continue;
-
-			if (!(fds[0].revents & POLLOUT))
-				continue;
-		}
-
-		if (opt_tx_cycle_ns) {
-			next.tv_sec = next_tx_ns / NSEC_PER_SEC;
-			next.tv_nsec = next_tx_ns % NSEC_PER_SEC;
-			err = clock_nanosleep(opt_clock, TIMER_ABSTIME, &next, NULL);
-			if (err) {
-				if (err != EINTR)
-					fprintf(stderr,
-						"clock_nanosleep failed. Err:%d errno:%d\n",
-						err, errno);
-				break;
-			}
-
-			/* Measure periodic Tx scheduling variance */
-			tx_ns = get_nsecs();
-			diff = tx_ns - next_tx_ns;
-			if (diff < tx_cycle_diff_min)
-				tx_cycle_diff_min = diff;
-
-			if (diff > tx_cycle_diff_max)
-				tx_cycle_diff_max = diff;
-
-			tx_cycle_diff_ave += (double)diff;
-			tx_cycle_cnt++;
-		} else if (opt_tstamp) {
-			tx_ns = get_nsecs();
-		}
-
-		for (i = 0; i < num_socks; i++)
-			tx_cnt += tx_only(xsks[i], &frame_nb[i], batch_size, tx_ns);
-
-		pkt_cnt += tx_cnt;
-
-		if (benchmark_done)
-			break;
-
-		if (opt_tx_cycle_ns)
-			next_tx_ns += opt_tx_cycle_ns;
-	}
-
-	if (opt_pkt_count)
-		complete_tx_only_all();
-}
 
 static void l2fwd(struct xsk_socket_info *xsk)
 {
@@ -2069,11 +1594,11 @@ int main(int argc, char **argv)
 
 	/* Create sockets... */
 	umem = xsk_configure_umem(bufs, NUM_FRAMES * opt_xsk_frame_size);
-	if (opt_bench == BENCH_RXDROP || opt_bench == BENCH_L2FWD) {
+	if (opt_bench == BENCH_L2FWD) {
 		rx = true;
 		xsk_populate_fill_ring(umem);
 	}
-	if (opt_bench == BENCH_L2FWD || opt_bench == BENCH_TXONLY)
+	if (opt_bench == BENCH_L2FWD )
 		tx = true;
 	for (i = 0; i < opt_num_xsks; i++)
 		xsks[num_socks++] = xsk_configure_socket(umem, rx, tx);
@@ -2081,18 +1606,10 @@ int main(int argc, char **argv)
 	for (i = 0; i < opt_num_xsks; i++)
 		apply_setsockopt(xsks[i]);
 
-	if (opt_bench == BENCH_TXONLY) {
-		if (opt_tstamp && opt_pkt_size < PKTGEN_SIZE_MIN)
-			opt_pkt_size = PKTGEN_SIZE_MIN;
 
-		gen_eth_hdr_data();
-
-		for (i = 0; i < NUM_FRAMES; i++)
-			gen_eth_frame(umem, i * opt_xsk_frame_size);
-	}
 	frames_per_pkt = (opt_pkt_size - 1) / XSK_UMEM__DEFAULT_FRAME_SIZE + 1;
 
-	if (load_xdp_prog && opt_bench != BENCH_TXONLY)
+	if (load_xdp_prog)
 		enter_xsks_into_map();
 
 	if (opt_reduced_cap) {
@@ -2135,12 +1652,8 @@ int main(int argc, char **argv)
 		goto out;
 	}
 
-	if (opt_bench == BENCH_RXDROP)
-		rx_drop_all();
-	else if (opt_bench == BENCH_TXONLY)
-		tx_only_all();
-	else
-		l2fwd_all();
+
+	l2fwd_all();
 
 out:
 	benchmark_done = true;
