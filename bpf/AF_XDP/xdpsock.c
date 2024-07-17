@@ -123,12 +123,10 @@ static int opt_timeout = 1000;
 static bool opt_need_wakeup = true;
 static u32 opt_num_xsks = 1;
 static bool opt_busy_poll;
-static bool opt_reduced_cap;
 static clockid_t opt_clock = CLOCK_MONOTONIC;
 static int opt_schpolicy = SCHED_OTHER;
 static int opt_schprio = SCHED_PRI__DEFAULT;
 static struct xdp_program *xdp_prog;
-static bool opt_frags;
 static bool load_xdp_prog;
 
 struct vlan_ethhdr {
@@ -471,28 +469,12 @@ static void dump_stats(void)
 		print_benchmark(false);
 		printf("\n");
 
-		if (opt_frags) {
-			u64 rx_frags = xsks[i]->ring_stats.rx_frags;
-			u64 tx_frags = xsks[i]->ring_stats.tx_frags;
-			double rx_fps = (rx_frags - xsks[i]->ring_stats.prev_rx_frags) *
-				1000000000. / dt;
-			double tx_fps = (tx_frags - xsks[i]->ring_stats.prev_tx_frags) *
-				1000000000. / dt;
-			char *ffmt = "%-18s %'-14.0f %'-14lu %'-14.0f %'-14lu\n";
 
-			printf("%-18s %-14s %-14s %-14s %-14s %-14.2f\n", "", "pps", "pkts",
-					"fps", "frags", dt / 1000000000.);
-			printf(ffmt, "rx", rx_pps, xsks[i]->ring_stats.rx_npkts, rx_fps, rx_frags);
-			printf(ffmt, "tx", tx_pps, xsks[i]->ring_stats.tx_npkts, tx_fps, tx_frags);
-			xsks[i]->ring_stats.prev_rx_frags = rx_frags;
-			xsks[i]->ring_stats.prev_tx_frags = tx_frags;
-		} else {
 
-			printf("%-18s %-14s %-14s %-14.2f\n", "", "pps", "pkts",
-					dt / 1000000000.);
-			printf(fmt, "rx", rx_pps, xsks[i]->ring_stats.rx_npkts);
-			printf(fmt, "tx", tx_pps, xsks[i]->ring_stats.tx_npkts);
-		}
+		printf("%-18s %-14s %-14s %-14.2f\n", "", "pps", "pkts",
+				dt / 1000000000.);
+		printf(fmt, "rx", rx_pps, xsks[i]->ring_stats.rx_npkts);
+		printf(fmt, "tx", tx_pps, xsks[i]->ring_stats.tx_npkts);
 
 		xsks[i]->ring_stats.prev_rx_npkts = xsks[i]->ring_stats.rx_npkts;
 		xsks[i]->ring_stats.prev_tx_npkts = xsks[i]->ring_stats.tx_npkts;
@@ -607,17 +589,13 @@ static void __exit_with_error(int error, const char *file, const char *func,
 static void xdpsock_cleanup(void)
 {
 	struct xsk_umem *umem = xsks[0]->umem->umem;
-	int i, cmd = CLOSE_CONN;
+	int i;
 
 	dump_stats();
 	for (i = 0; i < num_socks; i++)
 		xsk_socket__delete(xsks[i]->xsk);
 	(void)xsk_umem__delete(umem);
 
-	if (opt_reduced_cap) {
-		if (write(sock, &cmd, sizeof(int)) < 0)
-			exit_with_error(errno);
-	}
 
 	if (load_xdp_prog)
 		remove_xdp_program();
@@ -911,7 +889,7 @@ static struct xsk_socket_info *xsk_configure_socket(struct xsk_umem_info *umem,
 	xsk->umem = umem;
 	cfg.rx_size = XSK_RING_CONS__DEFAULT_NUM_DESCS;
 	cfg.tx_size = XSK_RING_PROD__DEFAULT_NUM_DESCS;
-	if (load_xdp_prog || opt_reduced_cap)
+	if (load_xdp_prog )
 		cfg.libxdp_flags = XSK_LIBXDP_FLAGS__INHIBIT_PROG_LOAD;
 	else
 		cfg.libxdp_flags = 0;
@@ -956,7 +934,6 @@ static struct option long_options[] = {
 	{"no-need-wakeup", no_argument, 0, 'm'},
 	{"unaligned", no_argument, 0, 'u'},
 	{"shared-umem", no_argument, 0, 'M'},
-	{"force", no_argument, 0, 'F'},
 	{"duration", required_argument, 0, 'd'},
 	{"clock", required_argument, 0, 'w'},
 	{"batch-size", required_argument, 0, 'b'},	
@@ -967,7 +944,6 @@ static struct option long_options[] = {
 	{"app-stats", no_argument, 0, 'a'},
 	{"irq-string", no_argument, 0, 'I'},
 	{"busy-poll", no_argument, 0, 'B'},
-	{"reduce-cap", no_argument, 0, 'R'},
 	{0, 0, 0, 0}
 };
 
@@ -1001,8 +977,6 @@ static void usage(const char *prog)
 		"  -a, --app-stats	Display application (syscall) statistics.\n"
 		"  -I, --irq-string	Display driver interrupt statistics for interface associated with irq-string.\n"
 		"  -B, --busy-poll      Busy poll.\n"
-		"  -R, --reduce-cap	Use reduced capabilities (cannot be used with -M)\n"
-		"  -F, --frags		Enable frags (multi-buffer) support\n"
 		"\n";
 	fprintf(stderr, str, prog, XSK_UMEM__DEFAULT_FRAME_SIZE,
 		opt_batch_size, MIN_PKT_SIZE, MIN_PKT_SIZE,
@@ -1021,7 +995,7 @@ static void parse_command_line(int argc, char **argv)
 
 	for (;;) {
 		c = getopt_long(argc, argv,
-				"i:q:pSNn:w:O:czf:muMd:b:W:U:xQaI:BRF",
+				"i:q:pSNn:w:O:czf:muMd:b:W:U:xQaI:B",
 				long_options, &option_index);
 		if (c == -1)
 			break;
@@ -1117,12 +1091,7 @@ static void parse_command_line(int argc, char **argv)
 		case 'B':
 			opt_busy_poll = 1;
 			break;
-		case 'R':
-			opt_reduced_cap = true;
-			break;
-		case 'F':
-			opt_frags = true;
-			break;
+
 		default:
 			usage(basename(argv[0]));
 		}
@@ -1142,13 +1111,8 @@ static void parse_command_line(int argc, char **argv)
 		usage(basename(argv[0]));
 	}
 
-	if (opt_reduced_cap && opt_num_xsks > 1) {
-		fprintf(stderr, "ERROR: -M and -R cannot be used together\n");
-		usage(basename(argv[0]));
-	}
-	load_xdp_prog = (opt_num_xsks > 1 || opt_frags);
-	if (opt_frags)
-		opt_xdp_bind_flags |= XDP_USE_SG;
+	load_xdp_prog = (opt_num_xsks > 1 );
+
 }
 
 static void kick_tx(struct xsk_socket_info *xsk)
@@ -1346,7 +1310,7 @@ static void load_xdp_program(void)
 		exit(EXIT_FAILURE);
 	}
 
-	err = xdp_program__set_xdp_frags_support(xdp_prog, opt_frags);
+	err = xdp_program__set_xdp_frags_support(xdp_prog, false);
 	if (err) {
 		libxdp_strerror(err, errmsg, sizeof(errmsg));
 		fprintf(stderr, "ERROR: Enable frags support failed: %s\n", errmsg);
@@ -1472,116 +1436,28 @@ static void apply_setsockopt(struct xsk_socket_info *xsk)
 		exit_with_error(errno);
 }
 
-static int recv_xsks_map_fd_from_ctrl_node(int sock, int *_fd)
-{
-	char cms[CMSG_SPACE(sizeof(int))];
-	struct cmsghdr *cmsg;
-	struct msghdr msg;
-	struct iovec iov;
-	int value;
-	int len;
-
-	iov.iov_base = &value;
-	iov.iov_len = sizeof(int);
-
-	msg.msg_name = 0;
-	msg.msg_namelen = 0;
-	msg.msg_iov = &iov;
-	msg.msg_iovlen = 1;
-	msg.msg_flags = 0;
-	msg.msg_control = (caddr_t)cms;
-	msg.msg_controllen = sizeof(cms);
-
-	len = recvmsg(sock, &msg, 0);
-
-	if (len < 0) {
-		fprintf(stderr, "Recvmsg failed length incorrect.\n");
-		return -EINVAL;
-	}
-
-	if (len == 0) {
-		fprintf(stderr, "Recvmsg failed no data\n");
-		return -EINVAL;
-	}
-
-	cmsg = CMSG_FIRSTHDR(&msg);
-	*_fd = *(int *)CMSG_DATA(cmsg);
-
-	return 0;
-}
-
-static int
-recv_xsks_map_fd(int *xsks_map_fd)
-{
-	struct sockaddr_un server;
-	int err;
-
-	sock = socket(AF_UNIX, SOCK_STREAM, 0);
-	if (sock < 0) {
-		fprintf(stderr, "Error opening socket stream: %s", strerror(errno));
-		return errno;
-	}
-
-	server.sun_family = AF_UNIX;
-	strcpy(server.sun_path, SOCKET_NAME);
-
-	if (connect(sock, (struct sockaddr *)&server, sizeof(struct sockaddr_un)) < 0) {
-		close(sock);
-		fprintf(stderr, "Error connecting stream socket: %s", strerror(errno));
-		return errno;
-	}
-
-	err = recv_xsks_map_fd_from_ctrl_node(sock, xsks_map_fd);
-	if (err) {
-		fprintf(stderr, "Error %d receiving fd\n", err);
-		return err;
-	}
-	return 0;
-}
-
 int main(int argc, char **argv)
 {
-	struct __user_cap_header_struct hdr = { _LINUX_CAPABILITY_VERSION_3, 0 };
-	struct __user_cap_data_struct data[2] = { { 0 } };
 	struct rlimit r = {RLIM_INFINITY, RLIM_INFINITY};
 	bool rx = false, tx = false;
 	struct sched_param schparam;
 	struct xsk_umem_info *umem;
-	int xsks_map_fd = 0;
+
 	pthread_t pt;
 	int i, ret;
 	void *bufs;
 
 	parse_command_line(argc, argv);
 
-	if (opt_reduced_cap) {
-		if (capget(&hdr, data)  < 0)
-			fprintf(stderr, "Error getting capabilities\n");
-
-		data->effective &= CAP_TO_MASK(CAP_NET_RAW);
-		data->permitted &= CAP_TO_MASK(CAP_NET_RAW);
-
-		if (capset(&hdr, data) < 0)
-			fprintf(stderr, "Setting capabilities failed\n");
-
-		if (capget(&hdr, data)  < 0) {
-			fprintf(stderr, "Error getting capabilities\n");
-		} else {
-			fprintf(stderr, "Capabilities EFF %x Caps INH %x Caps Per %x\n",
-				data[0].effective, data[0].inheritable, data[0].permitted);
-			fprintf(stderr, "Capabilities EFF %x Caps INH %x Caps Per %x\n",
-				data[1].effective, data[1].inheritable, data[1].permitted);
-		}
-	} else {
-		if (setrlimit(RLIMIT_MEMLOCK, &r)) {
-			fprintf(stderr, "ERROR: setrlimit(RLIMIT_MEMLOCK) \"%s\"\n",
-				strerror(errno));
-			exit(EXIT_FAILURE);
-		}
-
-		if (load_xdp_prog)
-			load_xdp_program();
+	if (setrlimit(RLIMIT_MEMLOCK, &r)) {
+		fprintf(stderr, "ERROR: setrlimit(RLIMIT_MEMLOCK) \"%s\"\n",
+			strerror(errno));
+		exit(EXIT_FAILURE);
 	}
+
+	if (load_xdp_prog)
+		load_xdp_program();
+
 
 	/* Reserve memory for the umem. Use hugepages if unaligned chunk mode */
 	bufs = mmap(NULL, NUM_FRAMES * opt_xsk_frame_size,
@@ -1612,20 +1488,6 @@ int main(int argc, char **argv)
 	if (load_xdp_prog)
 		enter_xsks_into_map();
 
-	if (opt_reduced_cap) {
-		ret = recv_xsks_map_fd(&xsks_map_fd);
-		if (ret) {
-			fprintf(stderr, "Error %d receiving xsks_map_fd\n", ret);
-			exit_with_error(ret);
-		}
-		if (xsks[0]->xsk) {
-			ret = xsk_socket__update_xskmap(xsks[0]->xsk, xsks_map_fd);
-			if (ret) {
-				fprintf(stderr, "Update of BPF map failed(%d)\n", ret);
-				exit_with_error(ret);
-			}
-		}
-	}
 
 	signal(SIGINT, int_exit);
 	signal(SIGTERM, int_exit);
