@@ -764,13 +764,15 @@ static void parse_command_line(int argc, char **argv)
 
 }
 
-
+// TODO: needs to be fixed for poll
 static void receive(struct xsk_socket_info *xsk)
 {
-	u32 idx_rx = 0, frags_done = 0;
+	u32 idx_rx = 0, idx_fq = 0, frags_done = 0;
 	unsigned int rcvd, i, eop_cnt = 0;
 	static u32 nb_frags;
+	int ret;
 
+	// check if batch ready to receive
 	rcvd = xsk_ring_cons__peek(&xsk->rx, opt_batch_size, &idx_rx);
 	if (!rcvd) {
 		if (opt_busy_poll || xsk_ring_prod__needs_wakeup(&xsk->umem->fq)) {
@@ -780,12 +782,26 @@ static void receive(struct xsk_socket_info *xsk)
 		return;
 	}
 
+	// reserve the fill queue to put back the addresses
+	ret = xsk_ring_prod__reserve(&xsk->umem->fq, rcvd, &idx_fq);
+	while (ret != rcvd) {
+		if (ret < 0)
+			exit_with_error(-ret);
+		if (opt_busy_poll || xsk_ring_prod__needs_wakeup(&xsk->umem->fq)) {
+			xsk->app_stats.fill_fail_polls++;
+			recvfrom(xsk_socket__fd(xsk->xsk), NULL, 0, MSG_DONTWAIT, NULL, NULL);
+		}
+		ret = xsk_ring_prod__reserve(&xsk->umem->fq, rcvd, &idx_fq);
+	}
 
+
+	// process each packets and put back the addresses of buffers
 	for (i = 0; i < rcvd; i++) {
 		const struct xdp_desc *desc = xsk_ring_cons__rx_desc(&xsk->rx, idx_rx++);
 		bool eop = IS_EOP_DESC(desc->options);
 		u64 addr = desc->addr;
 		u32 len = desc->len;
+		u64 orig = xsk_umem__extract_addr(addr);
 
 		addr = xsk_umem__add_offset_to_addr(addr);
 		char *pkt = xsk_umem__get_data(xsk->umem->buffer, addr);
@@ -800,8 +816,13 @@ static void receive(struct xsk_socket_info *xsk)
 			nb_frags = 0;
 			eop_cnt++;
 		}
+
+		*xsk_ring_prod__fill_addr(&xsk->umem->fq, idx_fq++) = orig;
 	}
 
+	// submit the fill queue
+	xsk_ring_prod__submit(&xsk->umem->fq, rcvd);
+	// release the rx buffers
 	xsk_ring_cons__release(&xsk->rx, frags_done);
 
 	xsk->ring_stats.rx_npkts += eop_cnt;
@@ -813,13 +834,16 @@ static void receive_all(void)
 	struct pollfd fds[MAX_SOCKS] = {};
 	int i, ret;
 
+	for (i = 0; i < num_socks; i++) {
+		fds[i].fd = xsk_socket__fd(xsks[i]->xsk);
+		fds[i].events = POLLIN;
+	}
+
 	for (;;) {
 		if (opt_poll) {
-			for (i = 0; i < num_socks; i++) {
-				fds[i].fd = xsk_socket__fd(xsks[i]->xsk);
-				fds[i].events = POLLOUT | POLLIN;
+			for (i = 0; i < num_socks; i++) 
 				xsks[i]->app_stats.opt_polls++;
-			}
+
 			ret = poll(fds, num_socks, opt_timeout);
 			if (ret <= 0)
 				continue;
@@ -1009,7 +1033,6 @@ int main(int argc, char **argv)
 
 	rx = true;
 	xsk_populate_fill_ring(umem);
-	tx = true;
 	for (i = 0; i < opt_num_xsks; i++)
 		xsks[num_socks++] = xsk_configure_socket(umem, rx, tx);
 
