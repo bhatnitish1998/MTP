@@ -95,9 +95,6 @@ static u16 opt_pkt_size = MIN_PKT_SIZE;
 static bool opt_extra_stats;
 static bool opt_quiet;
 static bool opt_app_stats;
-static const char *opt_irq_str = "";
-static u32 irq_no;
-static int irqs_at_init = -1;
 static int opt_poll;
 static int opt_interval = 1;
 static int opt_retries = 3;
@@ -324,100 +321,6 @@ static void dump_app_stats(long dt)
 
 }
 
-static bool get_interrupt_number(void)
-{
-	FILE *f_int_proc;
-	char line[4096];
-	bool found = false;
-
-	f_int_proc = fopen("/proc/interrupts", "r");
-	if (f_int_proc == NULL) {
-		printf("Failed to open /proc/interrupts.\n");
-		return found;
-	}
-
-	while (!feof(f_int_proc) && !found) {
-		/* Make sure to read a full line at a time */
-		if (fgets(line, sizeof(line), f_int_proc) == NULL ||
-				line[strlen(line) - 1] != '\n') {
-			printf("Error reading from interrupts file\n");
-			break;
-		}
-
-		/* Extract interrupt number from line */
-		if (strstr(line, opt_irq_str) != NULL) {
-			irq_no = atoi(line);
-			found = true;
-			break;
-		}
-	}
-
-	fclose(f_int_proc);
-
-	return found;
-}
-
-static int get_irqs(void)
-{
-	char count_path[PATH_MAX];
-	int total_intrs = -1;
-	FILE *f_count_proc;
-	char line[4096];
-
-	snprintf(count_path, sizeof(count_path),
-		"/sys/kernel/irq/%i/per_cpu_count", irq_no);
-	f_count_proc = fopen(count_path, "r");
-	if (f_count_proc == NULL) {
-		printf("Failed to open %s\n", count_path);
-		return total_intrs;
-	}
-
-	if (fgets(line, sizeof(line), f_count_proc) == NULL ||
-			line[strlen(line) - 1] != '\n') {
-		printf("Error reading from %s\n", count_path);
-	} else {
-		static const char com[2] = ",";
-		char *token;
-
-		total_intrs = 0;
-		token = strtok(line, com);
-		while (token != NULL) {
-			/* sum up interrupts across all cores */
-			total_intrs += atoi(token);
-			token = strtok(NULL, com);
-		}
-	}
-
-	fclose(f_count_proc);
-
-	return total_intrs;
-}
-
-static void dump_driver_stats(long dt)
-{
-	int i;
-
-	for (i = 0; i < num_socks && xsks[i]; i++) {
-		char *fmt = "%-18s %'-14.0f %'-14lu\n";
-		double intrs_ps;
-		int n_ints = get_irqs();
-
-		if (n_ints < 0) {
-			printf("error getting intr info for intr %i\n", irq_no);
-			return;
-		}
-		xsks[i]->drv_stats.intrs = n_ints - irqs_at_init;
-
-		intrs_ps = (xsks[i]->drv_stats.intrs - xsks[i]->drv_stats.prev_intrs) *
-			 1000000000. / dt;
-
-		printf("\n%-18s %-14s %-14s\n", "", "intrs/s", "count");
-		printf(fmt, "irqs", intrs_ps, xsks[i]->drv_stats.intrs);
-
-		xsks[i]->drv_stats.prev_intrs = xsks[i]->drv_stats.intrs;
-	}
-}
-
 static void dump_stats(void)
 {
 	unsigned long now = get_nsecs();
@@ -504,8 +407,6 @@ static void dump_stats(void)
 
 	if (opt_app_stats)
 		dump_app_stats(dt);
-	if (irq_no)
-		dump_driver_stats(dt);
 }
 
 static bool is_benchmark_done(void)
@@ -751,7 +652,6 @@ static struct option long_options[] = {
 	{"extra-stats", no_argument, 0, 'x'},
 	{"quiet", no_argument, 0, 'Q'},
 	{"app-stats", no_argument, 0, 'a'},
-	{"irq-string", no_argument, 0, 'I'},
 	{"busy-poll", no_argument, 0, 'B'},
 	{0, 0, 0, 0}
 };
@@ -784,7 +684,6 @@ static void usage(const char *prog)
 		"  -x, --extra-stats	Display extra statistics.\n"
 		"  -Q, --quiet          Do not display any stats.\n"
 		"  -a, --app-stats	Display application (syscall) statistics.\n"
-		"  -I, --irq-string	Display driver interrupt statistics for interface associated with irq-string.\n"
 		"  -B, --busy-poll      Busy poll.\n"
 		"\n";
 	fprintf(stderr, str, prog, XSK_UMEM__DEFAULT_FRAME_SIZE,
@@ -886,15 +785,6 @@ static void parse_command_line(int argc, char **argv)
 			break;
 		case 'a':
 			opt_app_stats = 1;
-			break;
-		case 'I':
-			opt_irq_str = optarg;
-			if (get_interrupt_number())
-				irqs_at_init = get_irqs();
-			if (irqs_at_init < 0) {
-				fprintf(stderr, "ERROR: Failed to get irqs for %s\n", opt_irq_str);
-				usage(basename(argv[0]));
-			}
 			break;
 		case 'B':
 			opt_busy_poll = 1;
