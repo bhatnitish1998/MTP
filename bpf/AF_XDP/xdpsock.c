@@ -240,7 +240,7 @@ static void print_benchmark(bool running)
 {
 	const char *bench_str = "INVALID";
 
-	bench_str = "l2fwd";
+	bench_str = "receive";
 
 	printf("%s:%d %s ", opt_if, opt_queue, bench_str);
 	if (opt_attach_mode == XDP_MODE_SKB)
@@ -923,77 +923,12 @@ static void parse_command_line(int argc, char **argv)
 
 }
 
-static void kick_tx(struct xsk_socket_info *xsk)
+
+static void receive(struct xsk_socket_info *xsk)
 {
-	int ret;
-	ret = sendto(xsk_socket__fd(xsk->xsk), NULL, 0, MSG_DONTWAIT, NULL, 0);
-
-	if (ret >= 0 || errno == ENOBUFS || errno == EAGAIN ||
-	    errno == EBUSY || errno == ENETDOWN)
-		return;
-	exit_with_error(errno);
-}
-
-static inline void complete_tx_l2fwd(struct xsk_socket_info *xsk)
-{
-	struct xsk_umem_info *umem = xsk->umem;
-	u32 idx_cq = 0, idx_fq = 0;
-	unsigned int rcvd;
-	size_t ndescs;
-
-	if (!xsk->outstanding_tx)
-		return;
-
-	/* In copy mode, Tx is driven by a syscall so we need to use e.g. sendto() to
-	 * really send the packets. In zero-copy mode we do not have to do this, since Tx
-	 * is driven by the NAPI loop. So as an optimization, we do not have to call
-	 * sendto() all the time in zero-copy mode for l2fwd.
-	 */
-	if (opt_xdp_bind_flags & XDP_COPY) {
-		xsk->app_stats.copy_tx_sendtos++;
-		kick_tx(xsk);
-	}
-
-	ndescs = (xsk->outstanding_tx > opt_batch_size) ? opt_batch_size :
-		xsk->outstanding_tx;
-
-	/* re-add completed Tx buffers */
-	rcvd = xsk_ring_cons__peek(&umem->cq, ndescs, &idx_cq);
-	if (rcvd > 0) {
-		unsigned int i;
-		int ret;
-
-		ret = xsk_ring_prod__reserve(&umem->fq, rcvd, &idx_fq);
-		while (ret != rcvd) {
-			if (ret < 0)
-				exit_with_error(-ret);
-			if (opt_busy_poll || xsk_ring_prod__needs_wakeup(&umem->fq)) {
-				xsk->app_stats.fill_fail_polls++;
-				recvfrom(xsk_socket__fd(xsk->xsk), NULL, 0, MSG_DONTWAIT, NULL,
-					 NULL);
-			}
-			ret = xsk_ring_prod__reserve(&umem->fq, rcvd, &idx_fq);
-		}
-
-		for (i = 0; i < rcvd; i++)
-			*xsk_ring_prod__fill_addr(&umem->fq, idx_fq++) =
-				*xsk_ring_cons__comp_addr(&umem->cq, idx_cq++);
-
-		xsk_ring_prod__submit(&xsk->umem->fq, rcvd);
-		xsk_ring_cons__release(&xsk->umem->cq, rcvd);
-		xsk->outstanding_tx -= rcvd;
-	}
-}
-
-
-static void l2fwd(struct xsk_socket_info *xsk)
-{
-	u32 idx_rx = 0, idx_tx = 0, frags_done = 0;
+	u32 idx_rx = 0, frags_done = 0;
 	unsigned int rcvd, i, eop_cnt = 0;
 	static u32 nb_frags;
-	int ret;
-
-	complete_tx_l2fwd(xsk);
 
 	rcvd = xsk_ring_cons__peek(&xsk->rx, opt_batch_size, &idx_rx);
 	if (!rcvd) {
@@ -1004,24 +939,12 @@ static void l2fwd(struct xsk_socket_info *xsk)
 		return;
 	}
 
-	ret = xsk_ring_prod__reserve(&xsk->tx, rcvd, &idx_tx);
-	while (ret != rcvd) {
-		if (ret < 0)
-			exit_with_error(-ret);
-		complete_tx_l2fwd(xsk);
-		if (opt_busy_poll || xsk_ring_prod__needs_wakeup(&xsk->tx)) {
-			xsk->app_stats.tx_wakeup_sendtos++;
-			kick_tx(xsk);
-		}
-		ret = xsk_ring_prod__reserve(&xsk->tx, rcvd, &idx_tx);
-	}
 
 	for (i = 0; i < rcvd; i++) {
 		const struct xdp_desc *desc = xsk_ring_cons__rx_desc(&xsk->rx, idx_rx++);
 		bool eop = IS_EOP_DESC(desc->options);
 		u64 addr = desc->addr;
 		u32 len = desc->len;
-		u64 orig = addr;
 
 		addr = xsk_umem__add_offset_to_addr(addr);
 		char *pkt = xsk_umem__get_data(xsk->umem->buffer, addr);
@@ -1031,12 +954,6 @@ static void l2fwd(struct xsk_socket_info *xsk)
 
 		hex_dump(pkt, len, addr);
 
-		struct xdp_desc *tx_desc = xsk_ring_prod__tx_desc(&xsk->tx, idx_tx++);
-
-		tx_desc->options = eop ? 0 : XDP_PKT_CONTD;
-		tx_desc->addr = orig;
-		tx_desc->len = len;
-
 		if (eop) {
 			frags_done += nb_frags;
 			nb_frags = 0;
@@ -1044,17 +961,13 @@ static void l2fwd(struct xsk_socket_info *xsk)
 		}
 	}
 
-	xsk_ring_prod__submit(&xsk->tx, frags_done);
 	xsk_ring_cons__release(&xsk->rx, frags_done);
 
 	xsk->ring_stats.rx_npkts += eop_cnt;
-	xsk->ring_stats.tx_npkts += eop_cnt;
 	xsk->ring_stats.rx_frags += rcvd;
-	xsk->ring_stats.tx_frags += rcvd;
-	xsk->outstanding_tx += frags_done;
 }
 
-static void l2fwd_all(void)
+static void receive_all(void)
 {
 	struct pollfd fds[MAX_SOCKS] = {};
 	int i, ret;
@@ -1072,7 +985,7 @@ static void l2fwd_all(void)
 		}
 
 		for (i = 0; i < num_socks; i++)
-			l2fwd(xsks[i]);
+			receive(xsks[i]);
 
 		if (benchmark_done)
 			break;
@@ -1295,7 +1208,7 @@ int main(int argc, char **argv)
 	}
 
 
-	l2fwd_all();
+	receive_all();
 
 out:
 	benchmark_done = true;
