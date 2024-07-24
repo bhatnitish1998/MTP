@@ -94,7 +94,6 @@ static u32 opt_batch_size = 64;
 static u16 opt_pkt_size = MIN_PKT_SIZE;
 static bool opt_extra_stats;
 static bool opt_quiet;
-static bool opt_app_stats;
 static int opt_poll;
 static int opt_interval = 1;
 static int opt_retries = 3;
@@ -280,47 +279,6 @@ static int xsk_get_xdp_stats(int fd, struct xsk_socket_info *xsk)
 	return -EINVAL;
 }
 
-static void dump_app_stats(long dt)
-{
-	int i;
-
-	for (i = 0; i < num_socks && xsks[i]; i++) {
-		char *fmt = "%-18s %'-14.0f %'-14lu\n";
-		double rx_empty_polls_ps, fill_fail_polls_ps, copy_tx_sendtos_ps,
-				tx_wakeup_sendtos_ps, opt_polls_ps;
-
-		rx_empty_polls_ps = (xsks[i]->app_stats.rx_empty_polls -
-					xsks[i]->app_stats.prev_rx_empty_polls) * 1000000000. / dt;
-		fill_fail_polls_ps = (xsks[i]->app_stats.fill_fail_polls -
-					xsks[i]->app_stats.prev_fill_fail_polls) * 1000000000. / dt;
-		copy_tx_sendtos_ps = (xsks[i]->app_stats.copy_tx_sendtos -
-					xsks[i]->app_stats.prev_copy_tx_sendtos) * 1000000000. / dt;
-		tx_wakeup_sendtos_ps = (xsks[i]->app_stats.tx_wakeup_sendtos -
-					xsks[i]->app_stats.prev_tx_wakeup_sendtos)
-										* 1000000000. / dt;
-		opt_polls_ps = (xsks[i]->app_stats.opt_polls -
-					xsks[i]->app_stats.prev_opt_polls) * 1000000000. / dt;
-
-		printf("\n%-18s %-14s %-14s\n", "", "calls/s", "count");
-		printf(fmt, "rx empty polls", rx_empty_polls_ps, xsks[i]->app_stats.rx_empty_polls);
-		printf(fmt, "fill fail polls", fill_fail_polls_ps,
-							xsks[i]->app_stats.fill_fail_polls);
-		printf(fmt, "copy tx sendtos", copy_tx_sendtos_ps,
-							xsks[i]->app_stats.copy_tx_sendtos);
-		printf(fmt, "tx wakeup sendtos", tx_wakeup_sendtos_ps,
-							xsks[i]->app_stats.tx_wakeup_sendtos);
-		printf(fmt, "opt polls", opt_polls_ps, xsks[i]->app_stats.opt_polls);
-
-		xsks[i]->app_stats.prev_rx_empty_polls = xsks[i]->app_stats.rx_empty_polls;
-		xsks[i]->app_stats.prev_fill_fail_polls = xsks[i]->app_stats.fill_fail_polls;
-		xsks[i]->app_stats.prev_copy_tx_sendtos = xsks[i]->app_stats.copy_tx_sendtos;
-		xsks[i]->app_stats.prev_tx_wakeup_sendtos = xsks[i]->app_stats.tx_wakeup_sendtos;
-		xsks[i]->app_stats.prev_opt_polls = xsks[i]->app_stats.opt_polls;
-	}
-
-
-}
-
 static void dump_stats(void)
 {
 	unsigned long now = get_nsecs();
@@ -405,8 +363,6 @@ static void dump_stats(void)
 		}
 	}
 
-	if (opt_app_stats)
-		dump_app_stats(dt);
 }
 
 static bool is_benchmark_done(void)
@@ -651,7 +607,6 @@ static struct option long_options[] = {
 	{"schpri", required_argument, 0, 'U'},
 	{"extra-stats", no_argument, 0, 'x'},
 	{"quiet", no_argument, 0, 'Q'},
-	{"app-stats", no_argument, 0, 'a'},
 	{"busy-poll", no_argument, 0, 'B'},
 	{0, 0, 0, 0}
 };
@@ -683,7 +638,6 @@ static void usage(const char *prog)
 		"  -U, --schpri=n       Schedule priority. Default: %d\n"
 		"  -x, --extra-stats	Display extra statistics.\n"
 		"  -Q, --quiet          Do not display any stats.\n"
-		"  -a, --app-stats	Display application (syscall) statistics.\n"
 		"  -B, --busy-poll      Busy poll.\n"
 		"\n";
 	fprintf(stderr, str, prog, XSK_UMEM__DEFAULT_FRAME_SIZE,
@@ -702,7 +656,7 @@ static void parse_command_line(int argc, char **argv)
 
 	for (;;) {
 		c = getopt_long(argc, argv,
-				"i:q:pSNn:w:O:czf:muMd:b:W:U:xQaI:B",
+				"i:q:pSNn:w:O:czf:muMd:b:W:U:xQB",
 				long_options, &option_index);
 		if (c == -1)
 			break;
@@ -782,9 +736,6 @@ static void parse_command_line(int argc, char **argv)
 			break;
 		case 'Q':
 			opt_quiet = 1;
-			break;
-		case 'a':
-			opt_app_stats = 1;
 			break;
 		case 'B':
 			opt_busy_poll = 1;
