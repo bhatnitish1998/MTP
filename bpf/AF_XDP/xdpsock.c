@@ -70,7 +70,6 @@
 
 
 // DEBUG VARIABLES
-#define DEBUG_HEXDUMP 0
 #define DEBUG_LATENCY 0
 
 
@@ -118,9 +117,6 @@ static bool load_xdp_prog;
 
 ///////////// Configuration variables ////////////////
 
-static bool opt_rand_pattern = false;
-static int rand_pattern_index = 1; // 16384{0},4096{1},2048{2},1024{3},512{4}
-
 // queue sizes: Changing umem sizes changes their size accordingly -U
 static u64 umem_size = 4096;
 static u32 fq_size = 4096;
@@ -147,6 +143,14 @@ u64 max_latency =1e15;
 double average_latency=0.0;
 double tail_latency_99=0.0; // 99th percentile;
 double tail_latency_999=0.0; // 99.9th percentile
+
+////////////// Address related variables //////////////
+
+static bool opt_rand_pattern = false;
+static int rand_pattern_index = 1; // 16384{0},4096{1},2048{2},1024{3},512{4}
+
+static u64 prev_addr = 0;
+static u64 out_of_order = 0;
 
 //////////////////////////////////////////////////////
 
@@ -312,6 +316,18 @@ void compute_latencies()
 
 void post_exp_process()
 {
+	struct stat st = {0};
+    if (stat("./logs", &st) == -1) {
+        mkdir("./logs", 0777);
+    }
+
+	FILE *file = fopen("./logs/stats.csv", "w");
+	if (file == NULL) {
+		perror("Error opening file");
+	}
+	fprintf(file, "out_of_order,%llu\n",out_of_order);
+	fclose(file);
+
 	if(opt_measure_latency)
 		compute_latencies();
 }
@@ -535,7 +551,7 @@ static void xdpsock_cleanup(void)
 		remove_xdp_program();
 }
 
-static void process_packet(void *data)
+static void process_packet(void *data, size_t length, u64 addr)
 {
 	// swap mac addresses
 	struct ether_header *eth = (struct ether_header *)data;
@@ -546,6 +562,12 @@ static void process_packet(void *data)
 	tmp = *src_addr;
 	*src_addr = *dst_addr;
 	*dst_addr = tmp;
+
+
+	// check for out of order packets
+	if(addr - prev_addr != opt_xsk_frame_size)
+		out_of_order++;
+	prev_addr = addr;
 
 	// Store latencies in array
 	if(opt_measure_latency)
@@ -587,41 +609,6 @@ static void process_packet(void *data)
 		}
 	}
 
-}
-
-static void hex_dump(void *pkt, size_t length, u64 addr)
-{
-	const unsigned char *address = (unsigned char *)pkt;
-	const unsigned char *line = address;
-	size_t line_size = 32;
-	unsigned char c;
-	char buf[32];
-	int i = 0;
-
-	if (!DEBUG_HEXDUMP)
-		return;
-
-	sprintf(buf, "addr=%llu", addr);
-	printf("length = %zu\n", length);
-	printf("%s | ", buf);
-	while (length-- > 0) {
-		printf("%02X ", *address++);
-		if (!(++i % line_size) || (length == 0 && i % line_size)) {
-			if (length == 0) {
-				while (i++ % line_size)
-					printf("__ ");
-			}
-			printf(" | ");	/* right close */
-			while (line < address) {
-				c = *line++;
-				printf("%c", (c < 33 || c == 255) ? 0x2E : c);
-			}
-			printf("\n");
-			if (length > 0)
-				printf("%s | ", buf);
-		}
-	}
-	printf("\n");
 }
 
 
@@ -989,9 +976,8 @@ static void receive(struct xsk_socket_info *xsk)
 		char *pkt = xsk_umem__get_data(xsk->umem->buffer, addr);
 
 		if (!nb_frags++)
-			process_packet(pkt);
+			process_packet(pkt,len,addr);
 
-		hex_dump(pkt, len, addr);
 
 		if (eop) {
 			frags_done += nb_frags;
