@@ -63,7 +63,6 @@
 #define SO_BUSY_POLL_BUDGET     70
 #endif
 
-#define NUM_FRAMES (4 * 1024)
 #define MIN_PKT_SIZE 64
 #define MAX_PKT_SIZE 9728 /* Max frame size supported by many NICs */
 #define IS_EOP_DESC(options) (!((options) & XDP_PKT_CONTD))
@@ -117,6 +116,19 @@ static int opt_schpolicy = SCHED_OTHER;
 static int opt_schprio = SCHED_PRI__DEFAULT;
 static struct xdp_program *xdp_prog;
 static bool load_xdp_prog;
+
+///////////// Configuration variables ////////////////
+
+// queue sizes: Changing umem sizes changes their size accordingly -U
+static u64 umem_size = 4096;
+static u32 fq_size = 4096;
+static u32 cq_size = 2048;
+static u32 rx_queue_size = 2048;
+static u32 tx_queue_size = 2048;
+
+// Number of fill queue descriptors -D
+static u32 num_fq_desc = 4096;
+
 
 ///////////// Latency related variables //////////////
 static bool opt_measure_latency;
@@ -634,8 +646,8 @@ static struct xsk_umem_info *xsk_configure_umem(void *buffer, u64 size)
 		 * allocated memory is used that only runs out in OOM situations
 		 * that should be rare.
 		 */
-		.fill_size = XSK_RING_PROD__DEFAULT_NUM_DESCS * 2,
-		.comp_size = XSK_RING_CONS__DEFAULT_NUM_DESCS,
+		.fill_size = fq_size,
+		.comp_size = cq_size,
 		.frame_size = opt_xsk_frame_size,
 		.frame_headroom = XSK_UMEM__DEFAULT_FRAME_HEADROOM,
 		.flags = opt_umem_flags
@@ -661,13 +673,13 @@ static void xsk_populate_fill_ring(struct xsk_umem_info *umem)
 	u32 idx;
 
 	ret = xsk_ring_prod__reserve(&umem->fq,
-				     XSK_RING_PROD__DEFAULT_NUM_DESCS * 2, &idx);
-	if (ret != XSK_RING_PROD__DEFAULT_NUM_DESCS * 2)
+				     num_fq_desc, &idx);
+	if (ret != num_fq_desc)
 		exit_with_error(-ret);
-	for (i = 0; i < XSK_RING_PROD__DEFAULT_NUM_DESCS * 2; i++)
+	for (i = 0; i < num_fq_desc; i++)
 		*xsk_ring_prod__fill_addr(&umem->fq, idx++) =
 			i * opt_xsk_frame_size;
-	xsk_ring_prod__submit(&umem->fq, XSK_RING_PROD__DEFAULT_NUM_DESCS * 2);
+	xsk_ring_prod__submit(&umem->fq, num_fq_desc);
 }
 
 static struct xsk_socket_info *xsk_configure_socket(struct xsk_umem_info *umem,
@@ -684,8 +696,8 @@ static struct xsk_socket_info *xsk_configure_socket(struct xsk_umem_info *umem,
 		exit_with_error(errno);
 
 	xsk->umem = umem;
-	cfg.rx_size = XSK_RING_CONS__DEFAULT_NUM_DESCS;
-	cfg.tx_size = XSK_RING_PROD__DEFAULT_NUM_DESCS;
+	cfg.rx_size = rx_queue_size;
+	cfg.tx_size = tx_queue_size;
 	if (load_xdp_prog )
 		cfg.libxdp_flags = XSK_LIBXDP_FLAGS__INHIBIT_PROG_LOAD;
 	else
@@ -738,6 +750,8 @@ static struct option long_options[] = {
 	{"quiet", no_argument, 0, 'Q'},
 	{"busy-poll", no_argument, 0, 'B'},
 	{"measure_latency", no_argument, 0, 'L'},
+	{"UMEM-size", required_argument, 0, 'U'},
+	{"descriptors", required_argument, 0, 'D'},
 	{0, 0, 0, 0}
 };
 
@@ -768,6 +782,8 @@ static void usage(const char *prog)
 		"  -Q, --quiet          Do not display any stats.\n"
 		"  -B, --busy-poll      Busy poll.\n"
 		"  -L, --measure-latency      Mesure latency.\n"
+		"  -U, --UMEM-size=n      Set UMEM size.\n"
+		"  -D, --descriptors=n      Set number of descritprs in fill ring.\n"
 		"\n";
 	fprintf(stderr, str, prog, XSK_UMEM__DEFAULT_FRAME_SIZE,
 		opt_batch_size, MIN_PKT_SIZE, MIN_PKT_SIZE,
@@ -785,7 +801,7 @@ static void parse_command_line(int argc, char **argv)
 
 	for (;;) {
 		c = getopt_long(argc, argv,
-				"i:q:pSNn:w:O:czf:muMd:b:xQBL",
+				"i:q:pSNn:w:O:czf:muMd:b:xQBLU:D:",
 				long_options, &option_index);
 		if (c == -1)
 			break;
@@ -860,6 +876,16 @@ static void parse_command_line(int argc, char **argv)
 			break;
 		case 'L':
 			opt_measure_latency = 1;
+			break;
+		case 'U':
+			umem_size = atoi(optarg);
+			fq_size = umem_size;
+			cq_size = umem_size/2;
+			rx_queue_size = umem_size/2;
+			tx_queue_size = umem_size/2;
+			break;
+		case 'D':
+			num_fq_desc = atoi(optarg);
 			break;
 
 		default:
@@ -1142,7 +1168,7 @@ int main(int argc, char **argv)
 
 
 	/* Reserve memory for the umem. Use hugepages if unaligned chunk mode */
-	bufs = mmap(NULL, NUM_FRAMES * opt_xsk_frame_size,
+	bufs = mmap(NULL, umem_size * opt_xsk_frame_size,
 		    PROT_READ | PROT_WRITE,
 		    MAP_PRIVATE | MAP_ANONYMOUS | opt_mmap_flags, -1, 0);
 	if (bufs == MAP_FAILED) {
@@ -1151,7 +1177,7 @@ int main(int argc, char **argv)
 	}
 
 	/* Create sockets... */
-	umem = xsk_configure_umem(bufs, NUM_FRAMES * opt_xsk_frame_size);
+	umem = xsk_configure_umem(bufs, umem_size * opt_xsk_frame_size);
 
 	rx = true;
 	xsk_populate_fill_ring(umem);
@@ -1204,7 +1230,7 @@ out:
 
 	xdpsock_cleanup();
 
-	munmap(bufs, NUM_FRAMES * opt_xsk_frame_size);
+	munmap(bufs, umem_size * opt_xsk_frame_size);
 
 	return 0;
 }
