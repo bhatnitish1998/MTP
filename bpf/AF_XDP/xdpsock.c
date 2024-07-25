@@ -327,6 +327,13 @@ void post_exp_process()
 	if (file == NULL) {
 		perror("Error opening file");
 	}
+	for (int i = 0; i < num_socks && xsks[i]; i++) {
+		fprintf(file, "rx_packets,%lu\n",xsks[i]->ring_stats.rx_npkts);
+		fprintf(file, "rx_dropped,%lu\n",xsks[i]->ring_stats.rx_dropped_npkts);
+		fprintf(file, "rx_invalid,%lu\n",xsks[i]->ring_stats.rx_invalid_npkts);
+		fprintf(file, "rx_queue_full,%lu\n",xsks[i]->ring_stats.rx_full_npkts);
+		fprintf(file, "fill_ring_empty,%lu\n",xsks[i]->ring_stats.rx_fill_empty_npkts);
+	}
 	fprintf(file, "out_of_order,%llu\n",out_of_order);
 	fclose(file);
 
