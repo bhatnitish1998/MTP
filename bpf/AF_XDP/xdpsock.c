@@ -40,6 +40,7 @@
 #include <bpf/libbpf.h>
 #include <bpf/bpf.h>
 #include "xdpsock.h"
+#include "address.h"
 
 #include <sys/stat.h>
 
@@ -117,14 +118,15 @@ static bool load_xdp_prog;
 
 ///////////// Configuration variables ////////////////
 
+static bool opt_rand_pattern = false;
+static int rand_pattern_index = 1; // 16384{0},4096{1},2048{2},1024{3},512{4}
+
 // queue sizes: Changing umem sizes changes their size accordingly -U
 static u64 umem_size = 4096;
 static u32 fq_size = 4096;
 static u32 cq_size = 2048;
 static u32 rx_queue_size = 2048;
 static u32 tx_queue_size = 2048;
-
-// Number of fill queue descriptors -D
 static u32 num_fq_desc = 4096;
 
 // Frame size -f
@@ -679,9 +681,16 @@ static void xsk_populate_fill_ring(struct xsk_umem_info *umem)
 				     num_fq_desc, &idx);
 	if (ret != num_fq_desc)
 		exit_with_error(-ret);
-	for (i = 0; i < num_fq_desc; i++)
-		*xsk_ring_prod__fill_addr(&umem->fq, idx++) =
-			i * opt_xsk_frame_size;
+
+	// Fill initial address based on sequential or random
+	for (i = 0; i < num_fq_desc; i++){
+
+		if(opt_rand_pattern)
+			*xsk_ring_prod__fill_addr(&umem->fq, idx++) = random_addr_series[rand_pattern_index][i] * opt_xsk_frame_size;
+		else		
+		*xsk_ring_prod__fill_addr(&umem->fq, idx++) = seq_addr_series[i] * opt_xsk_frame_size;
+	}
+
 	xsk_ring_prod__submit(&umem->fq, num_fq_desc);
 }
 
@@ -754,7 +763,7 @@ static struct option long_options[] = {
 	{"busy-poll", no_argument, 0, 'B'},
 	{"measure-latency", no_argument, 0, 'L'},
 	{"UMEM-size", required_argument, 0, 'U'},
-	{"descriptors", required_argument, 0, 'D'},
+	{"random-pattern", no_argument, 0, 'R'},
 	{0, 0, 0, 0}
 };
 
@@ -786,7 +795,7 @@ static void usage(const char *prog)
 		"  -B, --busy-poll      Busy poll.\n"
 		"  -L, --measure-latency      Mesure latency.\n"
 		"  -U, --UMEM-size=n      Set UMEM size.\n"
-		"  -D, --descriptors=n      Set number of descritprs in fill ring.\n"
+		"  -R, --random-pattern      Set access pattern to random.\n"
 		"\n";
 	fprintf(stderr, str, prog, opt_xsk_frame_size,
 		opt_batch_size, MIN_PKT_SIZE, MIN_PKT_SIZE,
@@ -804,7 +813,7 @@ static void parse_command_line(int argc, char **argv)
 
 	for (;;) {
 		c = getopt_long(argc, argv,
-				"i:q:pSNn:w:O:czf:muMd:b:xQBLU:D:",
+				"i:q:pSNn:w:O:czf:muMd:b:xQBLU:R",
 				long_options, &option_index);
 		if (c == -1)
 			break;
@@ -886,9 +895,33 @@ static void parse_command_line(int argc, char **argv)
 			cq_size = umem_size/2;
 			rx_queue_size = umem_size/2;
 			tx_queue_size = umem_size/2;
+			num_fq_desc = umem_size;
+
+			switch(umem_size)
+			{
+				case 16384:
+					rand_pattern_index = 0;
+					break;
+				case 4096:
+					rand_pattern_index = 1;
+					break;
+				case 2048:
+					rand_pattern_index = 2;
+					break;
+				case 1024:
+					rand_pattern_index = 3;
+					break;
+				case 512:
+					rand_pattern_index = 4;
+					break;
+				default:
+					printf("Invalid umem size\n Valid sizes = 16384, 4096, 2048, 1024, 512");
+					exit(EXIT_FAILURE);
+			}
+
 			break;
-		case 'D':
-			num_fq_desc = atoi(optarg);
+		case 'R':
+			opt_rand_pattern = 1;
 			break;
 
 		default:
