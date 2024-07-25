@@ -41,6 +41,8 @@
 #include <bpf/bpf.h>
 #include "xdpsock.h"
 
+#include <sys/stat.h>
+
 #ifndef SOL_XDP
 #define SOL_XDP 283
 #endif
@@ -66,7 +68,10 @@
 #define MAX_PKT_SIZE 9728 /* Max frame size supported by many NICs */
 #define IS_EOP_DESC(options) (!((options) & XDP_PKT_CONTD))
 
+
+// DEBUG VARIABLES
 #define DEBUG_HEXDUMP 0
+#define DEBUG_LATENCY 0
 
 
 #define NSEC_PER_SEC		1000000000UL
@@ -112,6 +117,21 @@ static int opt_schpolicy = SCHED_OTHER;
 static int opt_schprio = SCHED_PRI__DEFAULT;
 static struct xdp_program *xdp_prog;
 static bool load_xdp_prog;
+
+///////////// Latency related variables //////////////
+static bool opt_measure_latency;
+
+static int latency_count =0;
+#define MAX_LATENCY_COUNT 10000000
+u64 latency_array[MAX_LATENCY_COUNT];
+
+u64 min_latency =0;
+u64 max_latency =1e15;
+double average_latency=0.0;
+double tail_latency_99=0.0; // 99th percentile;
+double tail_latency_999=0.0; // 99.9th percentile
+
+//////////////////////////////////////////////////////
 
 struct xsk_ring_stats {
 	unsigned long rx_frags;
@@ -195,6 +215,98 @@ static const struct sched_map {
 static int num_socks;
 struct xsk_socket_info *xsks[MAX_SOCKS];
 int sock;
+
+///////////// Latency related functions //////////////
+void merge(u64 arr[], int low, int mid, int high)
+{
+	u64 temp[high - low +1];
+    int i =low;
+    int j = mid+1;
+    int k=0;
+
+    while(i<=mid && j<=high)
+    {
+        if (arr[i]<=arr[j])
+            temp[k++]= arr[i++];
+        else
+            temp[k++]= arr[j++];
+    }
+
+    while(i<=mid){
+        temp[k++]= arr[i++];
+	}
+
+    while(j<=high){
+        temp[k++]= arr[j++];
+	}
+
+	k=0;
+    for(i=low;i<=high;i++,k++)
+        arr[i] = temp[k];
+}
+
+void merge_sort(u64 v[], int low, int high)
+{
+    if(low >= high) return;
+
+    int mid = (low+high)/2;
+    merge_sort(v,low,mid);
+    merge_sort(v,mid+1,high);
+
+    merge(v,low,mid,high);
+}
+
+void compute_latencies()
+{
+	struct stat st = {0};
+    if (stat("./logs", &st) == -1) {
+        mkdir("./logs", 0777);
+    }
+
+	if(DEBUG_LATENCY)
+	{
+		FILE *file = fopen("./logs/latency_debug_info.txt", "w");
+		if (file == NULL) {
+			perror("Error opening file");
+		}
+
+		for(int i =0; i< latency_count; i++)
+		fprintf(file, "%lld\t",latency_array[i]);
+		
+		fclose(file);
+	}
+	merge_sort(latency_array,0,latency_count-1);
+	
+	// min
+	min_latency = latency_array[0];
+	// max
+	max_latency = latency_array[latency_count-1];
+	// average
+	for(int i =0; i< latency_count; i++)
+		average_latency += (double)latency_array[i] / latency_count;
+	// tail 99th percentile
+	for(int i =latency_count - (latency_count/100); i< latency_count; i++)
+		tail_latency_99 += (double)latency_array[i] / (latency_count/100);
+	// tail 99.9th percentile
+		for(int i =latency_count - (latency_count/1000); i< latency_count; i++)
+		tail_latency_999 += (double)latency_array[i] / (latency_count/1000);
+	
+	// Write it to file
+	FILE *file = fopen("./logs/latency_data.txt", "w");
+    if (file == NULL) {
+        perror("Error opening file");
+    }
+    fprintf(file, "%d,%lld,%lld,%.2f,%.2f,%.2f\n",latency_count, min_latency, max_latency, average_latency, tail_latency_99, tail_latency_999);
+    fclose(file);
+}
+
+//////////////////////////////////////////////////////
+
+void post_exp_process()
+{
+	if(opt_measure_latency)
+		compute_latencies();
+}
 
 static int get_clockid(clockid_t *id, const char *name)
 {
@@ -429,8 +541,9 @@ static void xdpsock_cleanup(void)
 		remove_xdp_program();
 }
 
-static void swap_mac_addresses(void *data)
+static void process_packet(void *data)
 {
+	// swap mac addresses
 	struct ether_header *eth = (struct ether_header *)data;
 	struct ether_addr *src_addr = (struct ether_addr *)&eth->ether_shost;
 	struct ether_addr *dst_addr = (struct ether_addr *)&eth->ether_dhost;
@@ -439,6 +552,47 @@ static void swap_mac_addresses(void *data)
 	tmp = *src_addr;
 	*src_addr = *dst_addr;
 	*dst_addr = tmp;
+
+	// Store latencies in array
+	if(opt_measure_latency)
+	{
+		void *payload = data + sizeof(struct ethhdr) + sizeof(struct iphdr) + sizeof(struct udphdr);
+		u64 *start = (u64*) payload;
+		u64 packet_sec = *start;
+		u64 packet_nsec = *(start +1);
+
+		// If no timestamp on packet return
+		if(packet_sec ==0 && packet_nsec ==0)
+			return;
+
+		else{
+
+			// compute delay
+			struct timespec ts;
+			clock_gettime(CLOCK_REALTIME, &ts);
+
+			u64 delay_sec = ts.tv_sec - packet_sec;
+			u64 delay_nsec = 0 ;
+
+			if(delay_sec !=0 )
+				delay_nsec +=1e9;
+
+
+			delay_nsec += ts.tv_nsec;
+			delay_nsec -= packet_nsec;
+
+			// store delay in array as microseconds
+			if(latency_count >= MAX_LATENCY_COUNT)
+			{
+				fprintf(stderr, "ERROR: Latency array overflow\n");
+				exit(EXIT_FAILURE);
+			}
+			
+			latency_array[latency_count] = delay_nsec/1000;
+			latency_count++;
+		}
+	}
+
 }
 
 static void hex_dump(void *pkt, size_t length, u64 addr)
@@ -608,6 +762,7 @@ static struct option long_options[] = {
 	{"extra-stats", no_argument, 0, 'x'},
 	{"quiet", no_argument, 0, 'Q'},
 	{"busy-poll", no_argument, 0, 'B'},
+	{"measure_latency", no_argument, 0, 'L'},
 	{0, 0, 0, 0}
 };
 
@@ -639,6 +794,7 @@ static void usage(const char *prog)
 		"  -x, --extra-stats	Display extra statistics.\n"
 		"  -Q, --quiet          Do not display any stats.\n"
 		"  -B, --busy-poll      Busy poll.\n"
+		"  -L, --measure-latency      Mesure latency.\n"
 		"\n";
 	fprintf(stderr, str, prog, XSK_UMEM__DEFAULT_FRAME_SIZE,
 		opt_batch_size, MIN_PKT_SIZE, MIN_PKT_SIZE,
@@ -656,7 +812,7 @@ static void parse_command_line(int argc, char **argv)
 
 	for (;;) {
 		c = getopt_long(argc, argv,
-				"i:q:pSNn:w:O:czf:muMd:b:W:U:xQB",
+				"i:q:pSNn:w:O:czf:muMd:b:W:U:xQBL",
 				long_options, &option_index);
 		if (c == -1)
 			break;
@@ -740,6 +896,9 @@ static void parse_command_line(int argc, char **argv)
 		case 'B':
 			opt_busy_poll = 1;
 			break;
+		case 'L':
+			opt_measure_latency = 1;
+			break;
 
 		default:
 			usage(basename(argv[0]));
@@ -764,7 +923,6 @@ static void parse_command_line(int argc, char **argv)
 
 }
 
-// TODO: needs to be fixed for poll
 static void receive(struct xsk_socket_info *xsk)
 {
 	u32 idx_rx = 0, idx_fq = 0, frags_done = 0;
@@ -807,7 +965,7 @@ static void receive(struct xsk_socket_info *xsk)
 		char *pkt = xsk_umem__get_data(xsk->umem->buffer, addr);
 
 		if (!nb_frags++)
-			swap_mac_addresses(pkt);
+			process_packet(pkt);
 
 		hex_dump(pkt, len, addr);
 
@@ -855,6 +1013,8 @@ static void receive_all(void)
 		if (benchmark_done)
 			break;
 	}
+
+	post_exp_process();
 }
 
 static void load_xdp_program(void)

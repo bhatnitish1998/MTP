@@ -1,3 +1,4 @@
 bpf/AF_XDP/xdpsock
 *.o
 *.ll
+bpf/AF_XDP/logs
