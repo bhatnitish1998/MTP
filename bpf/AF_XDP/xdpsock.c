@@ -203,15 +203,6 @@ static const struct clockid_map {
 	{ NULL }
 };
 
-static const struct sched_map {
-	const char *name;
-	int policy;
-} schmap[] = {
-	{ "OTHER", SCHED_OTHER },
-	{ "FIFO", SCHED_FIFO },
-	{ NULL }
-};
-
 static int num_socks;
 struct xsk_socket_info *xsks[MAX_SOCKS];
 int sock;
@@ -315,20 +306,6 @@ static int get_clockid(clockid_t *id, const char *name)
 	for (clk = clockids_map; clk->name; clk++) {
 		if (strcasecmp(clk->name, name) == 0) {
 			*id = clk->clockid;
-			return 0;
-		}
-	}
-
-	return -1;
-}
-
-static int get_schpolicy(int *policy, const char *name)
-{
-	const struct sched_map *sch;
-
-	for (sch = schmap; sch->name; sch++) {
-		if (strcasecmp(sch->name, name) == 0) {
-			*policy = sch->policy;
 			return 0;
 		}
 	}
@@ -757,8 +734,6 @@ static struct option long_options[] = {
 	{"duration", required_argument, 0, 'd'},
 	{"clock", required_argument, 0, 'w'},
 	{"batch-size", required_argument, 0, 'b'},	
-	{"policy", required_argument, 0, 'W'},
-	{"schpri", required_argument, 0, 'U'},
 	{"extra-stats", no_argument, 0, 'x'},
 	{"quiet", no_argument, 0, 'Q'},
 	{"busy-poll", no_argument, 0, 'B'},
@@ -789,8 +764,6 @@ static void usage(const char *prog)
 		"  -w, --clock=CLOCK	Clock NAME (default MONOTONIC).\n"
 		"  -b, --batch-size=n	Batch size for sending or receiving\n"
 		"			packets. Default: %d\n"
-		"  -W, --policy=POLICY  Schedule policy. Default: SCHED_OTHER\n"
-		"  -U, --schpri=n       Schedule priority. Default: %d\n"
 		"  -x, --extra-stats	Display extra statistics.\n"
 		"  -Q, --quiet          Do not display any stats.\n"
 		"  -B, --busy-poll      Busy poll.\n"
@@ -812,7 +785,7 @@ static void parse_command_line(int argc, char **argv)
 
 	for (;;) {
 		c = getopt_long(argc, argv,
-				"i:q:pSNn:w:O:czf:muMd:b:W:U:xQBL",
+				"i:q:pSNn:w:O:czf:muMd:b:xQBL",
 				long_options, &option_index);
 		if (c == -1)
 			break;
@@ -875,17 +848,6 @@ static void parse_command_line(int argc, char **argv)
 			break;
 		case 'b':
 			opt_batch_size = atoi(optarg);
-			break;
-		case 'W':
-			if (get_schpolicy(&opt_schpolicy, optarg)) {
-				fprintf(stderr,
-					"ERROR: Invalid policy %s. Default to SCHED_OTHER.\n",
-					optarg);
-				opt_schpolicy = SCHED_OTHER;
-			}
-			break;
-		case 'U':
-			opt_schprio = atoi(optarg);
 			break;
 		case 'x':
 			opt_extra_stats = 1;
