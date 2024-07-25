@@ -144,13 +144,15 @@ double average_latency=0.0;
 double tail_latency_99=0.0; // 99th percentile;
 double tail_latency_999=0.0; // 99.9th percentile
 
-////////////// Address related variables //////////////
+////////////// Packet related variables //////////////
 
 static bool opt_rand_pattern = false;
 static int rand_pattern_index = 1; // 16384{0},4096{1},2048{2},1024{3},512{4}
 
 static u64 prev_addr = 0;
 static u64 out_of_order = 0;
+
+static bool opt_access_packet = false;
 
 //////////////////////////////////////////////////////
 
@@ -609,6 +611,12 @@ static void process_packet(void *data, size_t length, u64 addr)
 		}
 	}
 
+	if(opt_access_packet)
+	{
+		unsigned char *pkt = (unsigned char *)data;
+		for(int i =0; i< length; i+=64)
+			pkt[i] = 'x';
+	}
 }
 
 
@@ -751,6 +759,7 @@ static struct option long_options[] = {
 	{"measure-latency", no_argument, 0, 'L'},
 	{"UMEM-size", required_argument, 0, 'U'},
 	{"random-pattern", no_argument, 0, 'R'},
+	{"access-packet", no_argument, 0, 'a'},
 	{0, 0, 0, 0}
 };
 
@@ -783,6 +792,7 @@ static void usage(const char *prog)
 		"  -L, --measure-latency      Mesure latency.\n"
 		"  -U, --UMEM-size=n      Set UMEM size.\n"
 		"  -R, --random-pattern      Set access pattern to random.\n"
+		"  -a, --access-packet      Write every cacheline of packet data.\n"
 		"\n";
 	fprintf(stderr, str, prog, opt_xsk_frame_size,
 		opt_batch_size, MIN_PKT_SIZE, MIN_PKT_SIZE,
@@ -800,7 +810,7 @@ static void parse_command_line(int argc, char **argv)
 
 	for (;;) {
 		c = getopt_long(argc, argv,
-				"i:q:pSNn:w:O:czf:muMd:b:xQBLU:R",
+				"i:q:pSNn:w:O:czf:muMd:b:xQBLU:Ra",
 				long_options, &option_index);
 		if (c == -1)
 			break;
@@ -909,6 +919,9 @@ static void parse_command_line(int argc, char **argv)
 			break;
 		case 'R':
 			opt_rand_pattern = 1;
+			break;
+		case 'a':
+			opt_access_packet = 1;
 			break;
 
 		default:
