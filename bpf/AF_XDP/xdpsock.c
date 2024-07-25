@@ -95,8 +95,6 @@ static unsigned long opt_duration;
 static unsigned long start_time;
 static bool benchmark_done;
 static u16 opt_pkt_size = MIN_PKT_SIZE;
-static bool opt_extra_stats;
-static bool opt_quiet;
 static int opt_poll;
 static int opt_interval = 1;
 static int opt_retries = 3;
@@ -316,30 +314,6 @@ void compute_latencies()
 
 //////////////////////////////////////////////////////
 
-void post_exp_process()
-{
-	struct stat st = {0};
-    if (stat("./logs", &st) == -1) {
-        mkdir("./logs", 0777);
-    }
-
-	FILE *file = fopen("./logs/stats.csv", "w");
-	if (file == NULL) {
-		perror("Error opening file");
-	}
-	for (int i = 0; i < num_socks && xsks[i]; i++) {
-		fprintf(file, "rx_packets,%lu\n",xsks[i]->ring_stats.rx_npkts);
-		fprintf(file, "rx_dropped,%lu\n",xsks[i]->ring_stats.rx_dropped_npkts);
-		fprintf(file, "rx_invalid,%lu\n",xsks[i]->ring_stats.rx_invalid_npkts);
-		fprintf(file, "rx_queue_full,%lu\n",xsks[i]->ring_stats.rx_full_npkts);
-		fprintf(file, "fill_ring_empty,%lu\n",xsks[i]->ring_stats.rx_fill_empty_npkts);
-	}
-	fprintf(file, "out_of_order,%llu\n",out_of_order);
-	fclose(file);
-
-	if(opt_measure_latency)
-		compute_latencies();
-}
 
 static int get_clockid(clockid_t *id, const char *name)
 {
@@ -363,28 +337,6 @@ static unsigned long get_nsecs(void)
 	return ts.tv_sec * 1000000000UL + ts.tv_nsec;
 }
 
-static void print_benchmark(bool running)
-{
-	const char *bench_str = "INVALID";
-
-	bench_str = "receive";
-
-	printf("%s:%d %s ", opt_if, opt_queue, bench_str);
-	if (opt_attach_mode == XDP_MODE_SKB)
-		printf("xdp-skb ");
-	else if (opt_attach_mode == XDP_MODE_NATIVE)
-		printf("xdp-drv ");
-	else
-		printf("	");
-
-	if (opt_poll)
-		printf("poll() ");
-
-	if (running) {
-		printf("running...");
-		fflush(stdout);
-	}
-}
 
 static int xsk_get_xdp_stats(int fd, struct xsk_socket_info *xsk)
 {
@@ -410,112 +362,32 @@ static int xsk_get_xdp_stats(int fd, struct xsk_socket_info *xsk)
 	return -EINVAL;
 }
 
-static void dump_stats(void)
+
+void post_exp_process()
 {
-	unsigned long now = get_nsecs();
-	long dt = now - prev_time;
-	int i;
+	struct stat st = {0};
+    if (stat("./logs", &st) == -1) {
+        mkdir("./logs", 0777);
+    }
 
-	prev_time = now;
-
-	for (i = 0; i < num_socks && xsks[i]; i++) {
-		char *fmt = "%-18s %'-14.0f %'-14lu\n";
-		double rx_pps, tx_pps, dropped_pps, rx_invalid_pps, full_pps, fill_empty_pps,
-			tx_invalid_pps, tx_empty_pps;
-
-		rx_pps = (xsks[i]->ring_stats.rx_npkts - xsks[i]->ring_stats.prev_rx_npkts) *
-			 1000000000. / dt;
-		tx_pps = (xsks[i]->ring_stats.tx_npkts - xsks[i]->ring_stats.prev_tx_npkts) *
-			 1000000000. / dt;
-
-		printf("\n sock%d@", i);
-		print_benchmark(false);
-		printf("\n");
-
-
-
-		printf("%-18s %-14s %-14s %-14.2f\n", "", "pps", "pkts",
-				dt / 1000000000.);
-		printf(fmt, "rx", rx_pps, xsks[i]->ring_stats.rx_npkts);
-		printf(fmt, "tx", tx_pps, xsks[i]->ring_stats.tx_npkts);
-
-		xsks[i]->ring_stats.prev_rx_npkts = xsks[i]->ring_stats.rx_npkts;
-		xsks[i]->ring_stats.prev_tx_npkts = xsks[i]->ring_stats.tx_npkts;
-
-		if (opt_extra_stats) {
-			if (!xsk_get_xdp_stats(xsk_socket__fd(xsks[i]->xsk), xsks[i])) {
-				dropped_pps = (xsks[i]->ring_stats.rx_dropped_npkts -
-						xsks[i]->ring_stats.prev_rx_dropped_npkts) *
-							1000000000. / dt;
-				rx_invalid_pps = (xsks[i]->ring_stats.rx_invalid_npkts -
-						xsks[i]->ring_stats.prev_rx_invalid_npkts) *
-							1000000000. / dt;
-				tx_invalid_pps = (xsks[i]->ring_stats.tx_invalid_npkts -
-						xsks[i]->ring_stats.prev_tx_invalid_npkts) *
-							1000000000. / dt;
-				full_pps = (xsks[i]->ring_stats.rx_full_npkts -
-						xsks[i]->ring_stats.prev_rx_full_npkts) *
-							1000000000. / dt;
-				fill_empty_pps = (xsks[i]->ring_stats.rx_fill_empty_npkts -
-						xsks[i]->ring_stats.prev_rx_fill_empty_npkts) *
-							1000000000. / dt;
-				tx_empty_pps = (xsks[i]->ring_stats.tx_empty_npkts -
-						xsks[i]->ring_stats.prev_tx_empty_npkts) *
-							1000000000. / dt;
-
-				printf(fmt, "rx dropped", dropped_pps,
-				       xsks[i]->ring_stats.rx_dropped_npkts);
-				printf(fmt, "rx invalid", rx_invalid_pps,
-				       xsks[i]->ring_stats.rx_invalid_npkts);
-				printf(fmt, "tx invalid", tx_invalid_pps,
-				       xsks[i]->ring_stats.tx_invalid_npkts);
-				printf(fmt, "rx queue full", full_pps,
-				       xsks[i]->ring_stats.rx_full_npkts);
-				printf(fmt, "fill ring empty", fill_empty_pps,
-				       xsks[i]->ring_stats.rx_fill_empty_npkts);
-				printf(fmt, "tx ring empty", tx_empty_pps,
-				       xsks[i]->ring_stats.tx_empty_npkts);
-
-				xsks[i]->ring_stats.prev_rx_dropped_npkts =
-					xsks[i]->ring_stats.rx_dropped_npkts;
-				xsks[i]->ring_stats.prev_rx_invalid_npkts =
-					xsks[i]->ring_stats.rx_invalid_npkts;
-				xsks[i]->ring_stats.prev_tx_invalid_npkts =
-					xsks[i]->ring_stats.tx_invalid_npkts;
-				xsks[i]->ring_stats.prev_rx_full_npkts =
-					xsks[i]->ring_stats.rx_full_npkts;
-				xsks[i]->ring_stats.prev_rx_fill_empty_npkts =
-					xsks[i]->ring_stats.rx_fill_empty_npkts;
-				xsks[i]->ring_stats.prev_tx_empty_npkts =
-					xsks[i]->ring_stats.tx_empty_npkts;
-			} else {
-				printf("%-15s\n", "Error retrieving extra stats");
-			}
+	FILE *file = fopen("./logs/stats.csv", "w");
+	if (file == NULL) {
+		perror("Error opening file");
+	}
+	for (int i = 0; i < num_socks && xsks[i]; i++) {
+		if (!xsk_get_xdp_stats(xsk_socket__fd(xsks[i]->xsk), xsks[i])){
+			fprintf(file, "rx_packets,%lu\n",xsks[i]->ring_stats.rx_npkts);
+			fprintf(file, "rx_dropped,%lu\n",xsks[i]->ring_stats.rx_dropped_npkts);
+			fprintf(file, "rx_invalid,%lu\n",xsks[i]->ring_stats.rx_invalid_npkts);
+			fprintf(file, "rx_queue_full,%lu\n",xsks[i]->ring_stats.rx_full_npkts);
+			fprintf(file, "fill_ring_empty,%lu\n",xsks[i]->ring_stats.rx_fill_empty_npkts);
 		}
 	}
+	fprintf(file, "out_of_order,%llu\n",out_of_order);
+	fclose(file);
 
-}
-
-static bool is_benchmark_done(void)
-{
-	if (opt_duration > 0) {
-		unsigned long dt = (get_nsecs() - start_time);
-
-		if (dt >= opt_duration)
-			benchmark_done = true;
-	}
-	return benchmark_done;
-}
-
-static void *poller(void *arg)
-{
-	(void)arg;
-	while (!is_benchmark_done()) {
-		sleep(opt_interval);
-		dump_stats();
-	}
-
-	return NULL;
+	if(opt_measure_latency)
+		compute_latencies();
 }
 
 static void remove_xdp_program(void)
@@ -550,7 +422,6 @@ static void xdpsock_cleanup(void)
 	struct xsk_umem *umem = xsks[0]->umem->umem;
 	int i;
 
-	dump_stats();
 	for (i = 0; i < num_socks; i++)
 		xsk_socket__delete(xsks[i]->xsk);
 	(void)xsk_umem__delete(umem);
@@ -760,8 +631,6 @@ static struct option long_options[] = {
 	{"duration", required_argument, 0, 'd'},
 	{"clock", required_argument, 0, 'w'},
 	{"batch-size", required_argument, 0, 'b'},	
-	{"extra-stats", no_argument, 0, 'x'},
-	{"quiet", no_argument, 0, 'Q'},
 	{"busy-poll", no_argument, 0, 'B'},
 	{"measure-latency", no_argument, 0, 'L'},
 	{"UMEM-size", required_argument, 0, 'U'},
@@ -793,8 +662,6 @@ static void usage(const char *prog)
 		"  -w, --clock=CLOCK	Clock NAME (default MONOTONIC).\n"
 		"  -b, --batch-size=n	Batch size for sending or receiving\n"
 		"			packets. Default: %d\n"
-		"  -x, --extra-stats	Display extra statistics.\n"
-		"  -Q, --quiet          Do not display any stats.\n"
 		"  -B, --busy-poll      Busy poll.\n"
 		"  -L, --measure-latency      Mesure latency.\n"
 		"  -U, --UMEM-size=n      Set UMEM size.\n"
@@ -817,7 +684,7 @@ static void parse_command_line(int argc, char **argv)
 
 	for (;;) {
 		c = getopt_long(argc, argv,
-				"i:q:pSNn:w:O:czf:muMd:b:xQBLU:Ra",
+				"i:q:pSNn:w:O:czf:muMd:b:BLU:Ra",
 				long_options, &option_index);
 		if (c == -1)
 			break;
@@ -880,12 +747,6 @@ static void parse_command_line(int argc, char **argv)
 			break;
 		case 'b':
 			opt_batch_size = atoi(optarg);
-			break;
-		case 'x':
-			opt_extra_stats = 1;
-			break;
-		case 'Q':
-			opt_quiet = 1;
 			break;
 		case 'B':
 			opt_busy_poll = 1;
@@ -1193,7 +1054,6 @@ int main(int argc, char **argv)
 	struct sched_param schparam;
 	struct xsk_umem_info *umem;
 
-	pthread_t pt;
 	int i, ret;
 	void *bufs;
 
@@ -1245,11 +1105,6 @@ int main(int argc, char **argv)
 	prev_time = get_nsecs();
 	start_time = prev_time;
 
-	if (!opt_quiet) {
-		ret = pthread_create(&pt, NULL, poller, NULL);
-		if (ret)
-			exit_with_error(ret);
-	}
 
 	/* Configure sched priority for better wake-up accuracy */
 	memset(&schparam, 0, sizeof(schparam));
@@ -1266,9 +1121,6 @@ int main(int argc, char **argv)
 
 out:
 	benchmark_done = true;
-
-	if (!opt_quiet)
-		pthread_join(pt, NULL);
 
 	xdpsock_cleanup();
 
