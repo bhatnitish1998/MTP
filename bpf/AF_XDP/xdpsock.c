@@ -94,7 +94,6 @@ static int opt_queue;
 static unsigned long opt_duration;
 static unsigned long start_time;
 static bool benchmark_done;
-static u32 opt_batch_size = 64;
 static u16 opt_pkt_size = MIN_PKT_SIZE;
 static bool opt_extra_stats;
 static bool opt_quiet;
@@ -105,7 +104,6 @@ static u32 opt_xdp_bind_flags = XDP_USE_NEED_WAKEUP;
 static u32 opt_umem_flags;
 static int opt_unaligned_chunks;
 static int opt_mmap_flags;
-static int opt_xsk_frame_size = XSK_UMEM__DEFAULT_FRAME_SIZE;
 static int frames_per_pkt;
 static int opt_timeout = 1000;
 static bool opt_need_wakeup = true;
@@ -129,6 +127,11 @@ static u32 tx_queue_size = 2048;
 // Number of fill queue descriptors -D
 static u32 num_fq_desc = 4096;
 
+// Frame size -f
+static int opt_xsk_frame_size = 4096;
+
+// Batch size -b
+static u32 opt_batch_size = 64;
 
 ///////////// Latency related variables //////////////
 static bool opt_measure_latency;
@@ -749,7 +752,7 @@ static struct option long_options[] = {
 	{"extra-stats", no_argument, 0, 'x'},
 	{"quiet", no_argument, 0, 'Q'},
 	{"busy-poll", no_argument, 0, 'B'},
-	{"measure_latency", no_argument, 0, 'L'},
+	{"measure-latency", no_argument, 0, 'L'},
 	{"UMEM-size", required_argument, 0, 'U'},
 	{"descriptors", required_argument, 0, 'D'},
 	{0, 0, 0, 0}
@@ -785,7 +788,7 @@ static void usage(const char *prog)
 		"  -U, --UMEM-size=n      Set UMEM size.\n"
 		"  -D, --descriptors=n      Set number of descritprs in fill ring.\n"
 		"\n";
-	fprintf(stderr, str, prog, XSK_UMEM__DEFAULT_FRAME_SIZE,
+	fprintf(stderr, str, prog, opt_xsk_frame_size,
 		opt_batch_size, MIN_PKT_SIZE, MIN_PKT_SIZE,
 		MAX_PKT_SIZE, 
 		SCHED_PRI__DEFAULT);
@@ -1188,7 +1191,7 @@ int main(int argc, char **argv)
 		apply_setsockopt(xsks[i]);
 
 
-	frames_per_pkt = (opt_pkt_size - 1) / XSK_UMEM__DEFAULT_FRAME_SIZE + 1;
+	frames_per_pkt = (opt_pkt_size - 1) / opt_xsk_frame_size + 1;
 
 	if (load_xdp_prog)
 		enter_xsks_into_map();
