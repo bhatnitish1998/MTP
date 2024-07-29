@@ -1,4 +1,7 @@
 bpf/AF_XDP/xdpsock
 *.o
 *.ll
+*.csv
+*.txt
 bpf/AF_XDP/logs
+ddio/change-ddio
