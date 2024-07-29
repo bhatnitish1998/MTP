@@ -152,7 +152,7 @@ def run_exp(exp_cmd,mode):
 
         print(f'Target {curr_t} Mbps, loss {loss*100:.2f}%, RX queue full {rx_queue_full}, out of order {out_of_order}\n')  
         
-        if int(rx_queue_full)==0:
+        if int(rx_queue_full)==0 and int(rx_fill_ring_empty)==0:
             formatted_loss = f"{loss*100:.3f}"
 
             if mode == 1:

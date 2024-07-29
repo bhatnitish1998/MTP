@@ -449,7 +449,7 @@ static void process_packet(void *data, size_t length, u64 addr)
 
 
 	// check for out of order packets
-	if(addr - prev_addr != opt_xsk_frame_size)
+	if(addr - prev_addr != multiplier)
 		out_of_order++;
 	prev_addr = addr;
 
@@ -737,6 +737,7 @@ static void parse_command_line(int argc, char **argv)
 			break;
 		case 'f':
 			opt_xsk_frame_size = atoi(optarg);
+			multiplier = opt_xsk_frame_size;
 			break;
 		case 'm':
 			opt_need_wakeup = false;
@@ -765,7 +766,6 @@ static void parse_command_line(int argc, char **argv)
 			rx_queue_size = umem_size/2;
 			tx_queue_size = umem_size/2;
 			num_fq_desc = umem_size;
-			multiplier = umem_size;
 
 			switch(umem_size)
 			{
