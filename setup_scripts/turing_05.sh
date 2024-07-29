@@ -1,6 +1,6 @@
 #!/bin/bash
 
-for i in {12..35}
+for i in {12..47}
 do
   sudo echo 0 > /sys/devices/system/cpu/cpu$i/online
 done
