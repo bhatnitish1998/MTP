@@ -39,6 +39,11 @@ experiments =[
 ['taskset', '-c', '0', 'sudo', APP_PATH,'-i', IFNAME,'-U','16384','-B'],
 ['taskset', '-c', '0', 'sudo', APP_PATH,'-i', IFNAME ,'-R','-U','16384','-B'],
 
+
+# Unaligned mode
+['taskset', '-c', '0', 'sudo', APP_PATH,'-i', IFNAME,'-U','16384','-u'],
+['taskset', '-c', '0', 'sudo', APP_PATH,'-i', IFNAME ,'-R','-U','16384','-u'],
+
 ]
 
 
@@ -100,10 +105,11 @@ def write_string_to_file(text):
 
 # mode 0 = cache     mode 1 = latency
 def run_exp(exp_cmd,mode):
+    curr_cmd = exp_cmd.copy()
     if mode == 1:
-        exp_cmd.append('-L')
+        curr_cmd.append('-L')
 
-    print(exp_cmd)
+    print(curr_cmd)
 
     curr_t = MAX_TARGET
     rx_queue_full = 9999999
@@ -114,7 +120,7 @@ def run_exp(exp_cmd,mode):
 
         flushllc = subprocess.run(['/home/preeti/nitish/cache/flush'], capture_output=True, text=True)
         set_interrupts_core()
-        app = subprocess.Popen(exp_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        app = subprocess.Popen(curr_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         cmd = ['ssh', TESTER, 'sudo', 'taskset', '-c', '0-11', MOONGEN_PATH, PKTGEN_SCRIPT_PATH, '0', '0', '-c', '1', '-o', 'tmp.csv', '-s', str(PKT_SIZE), '-r', str(curr_t), '-t', str(EXP_TIME)]
         pktgen = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         time.sleep(7)

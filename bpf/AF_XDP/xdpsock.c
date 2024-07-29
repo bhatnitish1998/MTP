@@ -129,6 +129,10 @@ static int opt_xsk_frame_size = 4096;
 // Batch size -b
 static u32 opt_batch_size = 64;
 
+// Address multiplier
+static int multiplier = 4096;
+static int packet_size = 64;
+
 ///////////// Latency related variables //////////////
 static bool opt_measure_latency;
 
@@ -559,9 +563,9 @@ static void xsk_populate_fill_ring(struct xsk_umem_info *umem)
 	for (i = 0; i < num_fq_desc; i++){
 
 		if(opt_rand_pattern)
-			*xsk_ring_prod__fill_addr(&umem->fq, idx++) = random_addr_series[rand_pattern_index][i] * opt_xsk_frame_size;
+			*xsk_ring_prod__fill_addr(&umem->fq, idx++) = random_addr_series[rand_pattern_index][i] * multiplier;
 		else		
-		*xsk_ring_prod__fill_addr(&umem->fq, idx++) = seq_addr_series[i] * opt_xsk_frame_size;
+		*xsk_ring_prod__fill_addr(&umem->fq, idx++) = seq_addr_series[i] * multiplier;
 	}
 
 	xsk_ring_prod__submit(&umem->fq, num_fq_desc);
@@ -761,6 +765,7 @@ static void parse_command_line(int argc, char **argv)
 			rx_queue_size = umem_size/2;
 			tx_queue_size = umem_size/2;
 			num_fq_desc = umem_size;
+			multiplier = umem_size;
 
 			switch(umem_size)
 			{
@@ -1068,6 +1073,8 @@ int main(int argc, char **argv)
 	if (load_xdp_prog)
 		load_xdp_program();
 
+	if(opt_unaligned_chunks)
+		multiplier = packet_size;
 
 	/* Reserve memory for the umem. Use hugepages if unaligned chunk mode */
 	bufs = mmap(NULL, umem_size * opt_xsk_frame_size,
