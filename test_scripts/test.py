@@ -198,8 +198,8 @@ def run_exp(exp_cmd,mode):
                     L2_pf_hit_percent = 0
                     L2_pf_miss_percent = 0
                 else:
-                L2_pf_hit_percent = (l2_rqsts_l2_pf_hit / l2_rqsts_all_pf ) * 100
-                L2_pf_miss_percent = (l2_rqsts_l2_pf_miss / l2_rqsts_all_pf) * 100
+                    L2_pf_hit_percent = (l2_rqsts_l2_pf_hit / l2_rqsts_all_pf ) * 100
+                    L2_pf_miss_percent = (l2_rqsts_l2_pf_miss / l2_rqsts_all_pf) * 100
 
  
                 with open(CACHE_FILENAME, 'a', newline='') as file:
