@@ -640,6 +640,7 @@ static struct option long_options[] = {
 	{"UMEM-size", required_argument, 0, 'U'},
 	{"random-pattern", no_argument, 0, 'R'},
 	{"access-packet", no_argument, 0, 'a'},
+	{"huge-pages", no_argument, 0, 'h'},
 	{0, 0, 0, 0}
 };
 
@@ -671,6 +672,7 @@ static void usage(const char *prog)
 		"  -U, --UMEM-size=n      Set UMEM size.\n"
 		"  -R, --random-pattern      Set access pattern to random.\n"
 		"  -a, --access-packet      Write every cacheline of packet data.\n"
+		"  -h, --huge-pages      Use huge pages for umem.\n"
 		"\n";
 	fprintf(stderr, str, prog, opt_xsk_frame_size,
 		opt_batch_size, MIN_PKT_SIZE, MIN_PKT_SIZE,
@@ -688,7 +690,7 @@ static void parse_command_line(int argc, char **argv)
 
 	for (;;) {
 		c = getopt_long(argc, argv,
-				"i:q:pSNn:w:O:czf:muMd:b:BLU:Ra",
+				"i:q:pSNn:w:O:czf:muMd:b:BLU:Rah",
 				long_options, &option_index);
 		if (c == -1)
 			break;
@@ -795,6 +797,9 @@ static void parse_command_line(int argc, char **argv)
 			break;
 		case 'a':
 			opt_access_packet = 1;
+			break;
+		case 'h':
+			opt_mmap_flags = MAP_HUGETLB;
 			break;
 
 		default:
