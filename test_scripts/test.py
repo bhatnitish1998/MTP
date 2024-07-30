@@ -193,6 +193,11 @@ def run_exp(exp_cmd,mode):
                 LLC_store_miss_percent = (LLC_store_misses/ LLC_stores)* 100
                 L1_dcache_load_miss_percent = (L1_dcache_load_misses/L1_dcache_loads) *100
                 L2_miss_percent = ( l2_rqsts_miss / l2_rqsts_references ) * 100
+
+                if l2_rqsts_all_pf ==0:
+                    L2_pf_hit_percent = 0
+                    L2_pf_miss_percent = 0
+                else:
                 L2_pf_hit_percent = (l2_rqsts_l2_pf_hit / l2_rqsts_all_pf ) * 100
                 L2_pf_miss_percent = (l2_rqsts_l2_pf_miss / l2_rqsts_all_pf) * 100
 
