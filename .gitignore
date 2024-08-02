@@ -5,3 +5,4 @@ bpf/AF_XDP/xdpsock
 *.txt
 bpf/AF_XDP/logs
 ddio/change-ddio
+.vscode

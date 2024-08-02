@@ -71,6 +71,7 @@
 
 // DEBUG VARIABLES
 #define DEBUG_LATENCY 0
+#define DEBUG_ADDRESS 0 
 
 
 #define NSEC_PER_SEC		1000000000UL
@@ -277,10 +278,7 @@ void merge_sort(u64 v[], int low, int high)
 
 void compute_latencies()
 {
-	struct stat st = {0};
-    if (stat("./logs", &st) == -1) {
-        mkdir("./logs", 0777);
-    }
+
 
 	if(DEBUG_LATENCY)
 	{
@@ -372,11 +370,6 @@ static int xsk_get_xdp_stats(int fd, struct xsk_socket_info *xsk)
 
 void post_exp_process()
 {
-	struct stat st = {0};
-    if (stat("./logs", &st) == -1) {
-        mkdir("./logs", 0777);
-    }
-
 	FILE *file = fopen("./logs/stats.csv", "w");
 	if (file == NULL) {
 		perror("Error opening file");
@@ -502,6 +495,16 @@ static void process_packet(void *data, size_t length, u64 addr)
 		for(int i =0; i< length; i+=64)
 			pkt[i] = 'x';
 	}
+}
+
+static void debug_addresses(u32 number, u64 addr, size_t length)
+{
+		FILE *file = fopen("./logs/addresses_info.txt", "a");
+		if (file == NULL) {
+			perror("Error opening file");
+		}
+		fprintf(file, "number:%u	address:%llu	length:%lu\n",number,addr/opt_xsk_frame_size,length);
+		fclose(file);
 }
 
 
@@ -878,6 +881,9 @@ static void receive(struct xsk_socket_info *xsk)
 		if (!nb_frags++)
 			process_packet(pkt,len,addr);
 
+		if(DEBUG_ADDRESS)
+			debug_addresses(i,addr,len);
+
 
 		if (eop) {
 			frags_done += nb_frags;
@@ -1093,6 +1099,20 @@ int main(int argc, char **argv)
 
 	if(opt_unaligned_chunks)
 		multiplier = packet_size;
+
+	struct stat st = {0};
+    if (stat("./logs", &st) == -1) {
+        mkdir("./logs", 0777);
+    }
+
+	if(DEBUG_ADDRESS)
+	{
+		FILE *file = fopen("./logs/addresses_info.txt", "w");
+		if (file == NULL) {
+			perror("Error opening file");
+		}
+		fclose(file);
+	}
 
 	/* Reserve memory for the umem. Use hugepages if unaligned chunk mode */
 	bufs = mmap(NULL, umem_size * opt_xsk_frame_size,
