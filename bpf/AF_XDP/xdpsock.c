@@ -71,7 +71,7 @@
 
 // DEBUG VARIABLES
 #define DEBUG_LATENCY 0
-#define DEBUG_ADDRESS 0 
+#define DEBUG_ADDRESS 1 
 
 
 #define NSEC_PER_SEC		1000000000UL
@@ -157,11 +157,19 @@ static u64 out_of_order = 0;
 
 static bool opt_access_packet = false;
 
-/////////////// Warm buffers ///////////////////////////////
+/////////////// Warm buffers & addresses  ////////////
 static bool opt_warm_buffers = false;
 
-//////////////////////////////////////////////////////
+struct addr_info{
+	u32 number;
+	u64 addr;
+	u32 len;
+};
 
+#define MAX_ADDRESS_COUNT 1000000
+struct addr_info addr_array[MAX_ADDRESS_COUNT];
+static int addr_count =0;
+//////////////////////////////////////////////////////
 struct xsk_ring_stats {
 	unsigned long rx_frags;
 	unsigned long rx_npkts;
@@ -367,6 +375,20 @@ static int xsk_get_xdp_stats(int fd, struct xsk_socket_info *xsk)
 	return -EINVAL;
 }
 
+static void  debug_addresses()
+{
+		FILE *file = fopen("./logs/addresses_info.txt", "a");
+		if (file == NULL) {
+			perror("Error opening file");
+		}
+		for(u32 i = 0; i < addr_count; i++)
+		{
+			fprintf(file, "number:%u	address:%llu	length:%u\n",addr_array[i].number,
+					addr_array[i].addr/opt_xsk_frame_size,addr_array[i].len);
+		}
+		fclose(file);
+}
+
 
 void post_exp_process()
 {
@@ -388,6 +410,9 @@ void post_exp_process()
 
 	if(opt_measure_latency)
 		compute_latencies();
+
+	if(DEBUG_ADDRESS)
+		debug_addresses();
 }
 
 static void remove_xdp_program(void)
@@ -431,7 +456,7 @@ static void xdpsock_cleanup(void)
 		remove_xdp_program();
 }
 
-static void process_packet(void *data, size_t length, u64 addr)
+static void inline process_packet(void *data, size_t length, u64 addr)
 {
 	// swap mac addresses
 	struct ether_header *eth = (struct ether_header *)data;
@@ -497,15 +522,6 @@ static void process_packet(void *data, size_t length, u64 addr)
 	}
 }
 
-static void debug_addresses(u32 number, u64 addr, size_t length)
-{
-		FILE *file = fopen("./logs/addresses_info.txt", "a");
-		if (file == NULL) {
-			perror("Error opening file");
-		}
-		fprintf(file, "number:%u	address:%llu	length:%lu\n",number,addr/opt_xsk_frame_size,length);
-		fclose(file);
-}
 
 
 #define ETH_FCS_SIZE 4
@@ -881,8 +897,12 @@ static void receive(struct xsk_socket_info *xsk)
 		if (!nb_frags++)
 			process_packet(pkt,len,addr);
 
-		if(DEBUG_ADDRESS)
-			debug_addresses(i,addr,len);
+		if(DEBUG_ADDRESS){
+			addr_array[addr_count].number = i;
+			addr_array[addr_count].addr = addr;
+			addr_array[addr_count].len = len;
+			addr_count++;
+		}
 
 
 		if (eop) {
