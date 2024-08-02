@@ -34,14 +34,14 @@
 #include <unistd.h>
 #include <sched.h>
 
-#include <xdp/xsk.h>
+// #include <xdp/xsk.h>
+#include "../lib/xdp-tools/headers/xdp/xsk.h"
 #include <xdp/libxdp.h>
 
 #include <bpf/libbpf.h>
 #include <bpf/bpf.h>
 #include "xdpsock.h"
 #include "address.h"
-
 #include <sys/stat.h>
 
 #ifndef SOL_XDP
@@ -155,6 +155,9 @@ static u64 prev_addr = 0;
 static u64 out_of_order = 0;
 
 static bool opt_access_packet = false;
+
+/////////////// Warm buffers ///////////////////////////////
+static bool opt_warm_buffers = false;
 
 //////////////////////////////////////////////////////
 
@@ -641,6 +644,7 @@ static struct option long_options[] = {
 	{"random-pattern", no_argument, 0, 'R'},
 	{"access-packet", no_argument, 0, 'a'},
 	{"huge-pages", no_argument, 0, 'h'},
+	{"Warm-buffers", no_argument, 0, 'W'},
 	{0, 0, 0, 0}
 };
 
@@ -673,6 +677,7 @@ static void usage(const char *prog)
 		"  -R, --random-pattern      Set access pattern to random.\n"
 		"  -a, --access-packet      Write every cacheline of packet data.\n"
 		"  -h, --huge-pages      Use huge pages for umem.\n"
+		"  -W, --Warm-buffers      Use recently read buffers first.\n"
 		"\n";
 	fprintf(stderr, str, prog, opt_xsk_frame_size,
 		opt_batch_size, MIN_PKT_SIZE, MIN_PKT_SIZE,
@@ -690,7 +695,7 @@ static void parse_command_line(int argc, char **argv)
 
 	for (;;) {
 		c = getopt_long(argc, argv,
-				"i:q:pSNn:w:O:czf:muMd:b:BLU:Rah",
+				"i:q:pSNn:w:O:czf:muMd:b:BLU:RahW",
 				long_options, &option_index);
 		if (c == -1)
 			break;
@@ -802,6 +807,10 @@ static void parse_command_line(int argc, char **argv)
 			opt_mmap_flags = MAP_HUGETLB;
 			break;
 
+		case 'W':
+			opt_warm_buffers = 1;
+			break;
+
 		default:
 			usage(basename(argv[0]));
 		}
@@ -876,7 +885,11 @@ static void receive(struct xsk_socket_info *xsk)
 			eop_cnt++;
 		}
 
-		*xsk_ring_prod__fill_addr(&xsk->umem->fq, idx_fq++) = orig;
+		if(opt_warm_buffers)
+			custom_xsk_ring_prod__fill_addr(&xsk->umem->fq, idx_fq++,orig,i);
+		else
+			*xsk_ring_prod__fill_addr(&xsk->umem->fq, idx_fq++) = orig;
+		
 	}
 
 	// submit the fill queue

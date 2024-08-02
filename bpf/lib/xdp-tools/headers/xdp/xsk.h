@@ -60,6 +60,15 @@ XDP_ALWAYS_INLINE __u64 *xsk_ring_prod__fill_addr(struct xsk_ring_prod *fill,
 	return &addrs[idx & fill->mask];
 }
 
+XDP_ALWAYS_INLINE void custom_xsk_ring_prod__fill_addr(struct xsk_ring_prod *fill,
+						  __u32 idx,__u64 addr,__u32 i)
+{
+	__u64 *addrs = (__u64 *)fill->ring;
+	__u64 oldval = __atomic_exchange_n (&addrs[(*fill->consumer +i) & fill->mask],addr,__ATOMIC_ACQ_REL);
+	*xsk_ring_prod__fill_addr(fill, idx) = oldval;
+	
+}
+
 XDP_ALWAYS_INLINE const __u64 *
 xsk_ring_cons__comp_addr(const struct xsk_ring_cons *comp, __u32 idx)
 {
