@@ -71,7 +71,7 @@
 
 // DEBUG VARIABLES
 #define DEBUG_LATENCY 0
-#define DEBUG_ADDRESS 1 
+#define DEBUG_ADDRESS 0 
 
 
 #define NSEC_PER_SEC		1000000000UL
@@ -132,7 +132,7 @@ static u32 opt_batch_size = 64;
 
 // Address multiplier
 static int multiplier = 4096;
-static int packet_size = 64;
+static int opt_packet_size = 512;
 
 ///////////// Latency related variables //////////////
 static bool opt_measure_latency;
@@ -664,6 +664,7 @@ static struct option long_options[] = {
 	{"access-packet", no_argument, 0, 'a'},
 	{"huge-pages", no_argument, 0, 'h'},
 	{"Warm-buffers", no_argument, 0, 'W'},
+	{"packet-size", required_argument, 0, 's'},
 	{0, 0, 0, 0}
 };
 
@@ -697,6 +698,7 @@ static void usage(const char *prog)
 		"  -a, --access-packet      Write every cacheline of packet data.\n"
 		"  -h, --huge-pages      Use huge pages for umem.\n"
 		"  -W, --Warm-buffers      Use recently read buffers first.\n"
+		"  -s, --packet-size=n   Specify the incoming packet size for better unaligned mode.\n"
 		"\n";
 	fprintf(stderr, str, prog, opt_xsk_frame_size,
 		opt_batch_size, MIN_PKT_SIZE, MIN_PKT_SIZE,
@@ -714,7 +716,7 @@ static void parse_command_line(int argc, char **argv)
 
 	for (;;) {
 		c = getopt_long(argc, argv,
-				"i:q:pSNn:w:O:czf:muMd:b:BLU:RahW",
+				"i:q:pSNn:w:O:czf:muMd:b:BLU:RahWs:",
 				long_options, &option_index);
 		if (c == -1)
 			break;
@@ -825,9 +827,11 @@ static void parse_command_line(int argc, char **argv)
 		case 'h':
 			opt_mmap_flags = MAP_HUGETLB;
 			break;
-
 		case 'W':
 			opt_warm_buffers = 1;
+			break;
+		case 's':
+			opt_packet_size = atoi(optarg);
 			break;
 
 		default:
@@ -1118,7 +1122,7 @@ int main(int argc, char **argv)
 		load_xdp_program();
 
 	if(opt_unaligned_chunks)
-		multiplier = packet_size;
+		multiplier = opt_packet_size;
 
 	struct stat st = {0};
     if (stat("./logs", &st) == -1) {
