@@ -41,7 +41,6 @@
 #include <bpf/libbpf.h>
 #include <bpf/bpf.h>
 #include "xdpsock.h"
-#include "address.h"
 #include <sys/stat.h>
 
 #ifndef SOL_XDP
@@ -134,6 +133,8 @@ static u32 opt_batch_size = 64;
 static int multiplier = 4096;
 static int opt_packet_size = 512;
 
+static bool opt_complete_umem;
+
 ///////////// Latency related variables //////////////
 static bool opt_measure_latency;
 
@@ -148,9 +149,6 @@ double tail_latency_99=0.0; // 99th percentile;
 double tail_latency_999=0.0; // 99.9th percentile
 
 ////////////// Packet related variables //////////////
-
-static bool opt_rand_pattern = false;
-static int rand_pattern_index = 1; // 16384{0},4096{1},2048{2},1024{3},512{4}
 
 static u64 prev_addr = 0;
 static u64 out_of_order = 0;
@@ -581,13 +579,9 @@ static void xsk_populate_fill_ring(struct xsk_umem_info *umem)
 	if (ret != num_fq_desc)
 		exit_with_error(-ret);
 
-	// Fill initial address based on sequential or random
+	// Fill initial address
 	for (i = 0; i < num_fq_desc; i++){
-
-		if(opt_rand_pattern)
-			*xsk_ring_prod__fill_addr(&umem->fq, idx++) = random_addr_series[rand_pattern_index][i] * multiplier;
-		else		
-		*xsk_ring_prod__fill_addr(&umem->fq, idx++) = seq_addr_series[i] * multiplier;
+		*xsk_ring_prod__fill_addr(&umem->fq, idx++) = i * multiplier;
 	}
 
 	xsk_ring_prod__submit(&umem->fq, num_fq_desc);
@@ -660,11 +654,11 @@ static struct option long_options[] = {
 	{"busy-poll", no_argument, 0, 'B'},
 	{"measure-latency", no_argument, 0, 'L'},
 	{"UMEM-size", required_argument, 0, 'U'},
-	{"random-pattern", no_argument, 0, 'R'},
 	{"access-packet", no_argument, 0, 'a'},
 	{"huge-pages", no_argument, 0, 'h'},
 	{"Warm-buffers", no_argument, 0, 'W'},
 	{"packet-size", required_argument, 0, 's'},
+	{"Complete-umem", no_argument, 0, 'C'},
 	{0, 0, 0, 0}
 };
 
@@ -694,11 +688,11 @@ static void usage(const char *prog)
 		"  -B, --busy-poll      Busy poll.\n"
 		"  -L, --measure-latency      Mesure latency.\n"
 		"  -U, --UMEM-size=n      Set UMEM size.\n"
-		"  -R, --random-pattern      Set access pattern to random.\n"
 		"  -a, --access-packet      Write every cacheline of packet data.\n"
 		"  -h, --huge-pages      Use huge pages for umem.\n"
 		"  -W, --Warm-buffers      Use recently read buffers first.\n"
 		"  -s, --packet-size=n   Specify the incoming packet size for better unaligned mode.\n"
+		"  -C, --Complete-umem   Use entire umem in unaligned mode. Extend fill queue as needed\n"
 		"\n";
 	fprintf(stderr, str, prog, opt_xsk_frame_size,
 		opt_batch_size, MIN_PKT_SIZE, MIN_PKT_SIZE,
@@ -716,7 +710,7 @@ static void parse_command_line(int argc, char **argv)
 
 	for (;;) {
 		c = getopt_long(argc, argv,
-				"i:q:pSNn:w:O:czf:muMd:b:BLU:RahWs:",
+				"i:q:pSNn:w:O:czf:muMd:b:BLU:ahWs:C",
 				long_options, &option_index);
 		if (c == -1)
 			break;
@@ -794,32 +788,6 @@ static void parse_command_line(int argc, char **argv)
 			rx_queue_size = umem_size/2;
 			tx_queue_size = umem_size/2;
 			num_fq_desc = umem_size;
-
-			switch(umem_size)
-			{
-				case 16384:
-					rand_pattern_index = 0;
-					break;
-				case 4096:
-					rand_pattern_index = 1;
-					break;
-				case 2048:
-					rand_pattern_index = 2;
-					break;
-				case 1024:
-					rand_pattern_index = 3;
-					break;
-				case 512:
-					rand_pattern_index = 4;
-					break;
-				default:
-					printf("Invalid umem size\n Valid sizes = 16384, 4096, 2048, 1024, 512");
-					exit(EXIT_FAILURE);
-			}
-
-			break;
-		case 'R':
-			opt_rand_pattern = 1;
 			break;
 		case 'a':
 			opt_access_packet = 1;
@@ -832,6 +800,9 @@ static void parse_command_line(int argc, char **argv)
 			break;
 		case 's':
 			opt_packet_size = atoi(optarg);
+			break;
+		case 'C':
+			opt_complete_umem = 1;
 			break;
 
 		default:
@@ -1121,8 +1092,16 @@ int main(int argc, char **argv)
 	if (load_xdp_prog)
 		load_xdp_program();
 
-	if(opt_unaligned_chunks)
+	if(opt_unaligned_chunks){
 		multiplier = opt_packet_size;
+
+		if(opt_complete_umem)
+		{
+			fq_size = (umem_size * opt_xsk_frame_size)/(opt_packet_size);
+			rx_queue_size = fq_size/2;
+			num_fq_desc = fq_size;
+		}
+	}
 
 	struct stat st = {0};
     if (stat("./logs", &st) == -1) {
