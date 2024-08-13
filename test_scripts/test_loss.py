@@ -25,8 +25,18 @@ PERF_COUNTERS = ['LLC-loads', 'LLC-load-misses', 'LLC-stores', 'LLC-store-misses
                  'l2_rqsts.references', 'l2_rqsts.miss', 'l2_rqsts.all_pf', 'l2_rqsts.l2_pf_hit', 'l2_rqsts.l2_pf_miss',
                  'instructions']
 
+MLC_ON = 1
+MLC_START_CORE = 2
+INT_CORE = 2 # bit corresponds to core
 
+def kill_mlc():
+    cmd = ['sudo', 'killall', '-SIGINT', 'mlc']
+    ret = subprocess.run(cmd)
 
+def start_mlc():
+    cmd = [f'/home/preeti/nitish/MTP/MLC/mlc', '-c11', f'-k{MLC_START_CORE}-10', f'-t{EXP_TIME+15}']
+    print(cmd)
+    mlc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 def change_ddio(value):
     cmd = ['sudo', '/home/preeti/nitish/MTP/ddio/change-ddio', str(value)]
@@ -43,7 +53,7 @@ def change_prefetch(value):
 
 
 def set_interrupts_core():
-    command = "echo 1 > /proc/irq/105/smp_affinity"
+    command = f"echo {INT_CORE} > /proc/irq/105/smp_affinity"
     subprocess.run(['sudo', 'bash', '-c', command], check=True)
 
 
@@ -116,6 +126,8 @@ def run_once(exp_cmd, mode, pattern, curr_t):
     #start
     flushllc = subprocess.run(['/home/preeti/nitish/cache/flush'], capture_output=True, text=True)
     set_interrupts_core()
+    if MLC_ON:
+        start_mlc()
     app = subprocess.Popen(curr_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     cmd = ['ssh', TESTER, 'sudo', 'taskset', '-c', '0-11', MOONGEN_PATH, PKTGEN_SCRIPT_PATH, '0', '0', '-c', '1', '-o',
            'tmp.csv', '-s', str(PKT_SIZE), '-r', str(curr_t), '-t', str(EXP_TIME)]
@@ -130,6 +142,8 @@ def run_once(exp_cmd, mode, pattern, curr_t):
 
     pktgen.wait()
     kill_process()
+    if MLC_ON:
+        kill_mlc()
     rate, tx_pkts = get_pktgen_stats()
     rx_pkts = get_rcvd_pkts()
     loss = (tx_pkts - rx_pkts) / tx_pkts
@@ -213,21 +227,21 @@ def run_till_zero(exp_cmd, mode, pattern):
 
     while True:
         loss, row = run_once(exp_cmd, mode, pattern, curr_t)
-        if loss < 0.001:
-            curr_t = min(MAX_TARGET, curr_t + 500)
+        if loss < 0.02:
+            curr_t = min(MAX_TARGET, curr_t + 1500)
+            break
+        curr_t = curr_t - 2000
+
+    while True:
+        loss, row = run_once(exp_cmd, mode, pattern, curr_t)
+        if loss < 0.02:
+            curr_t = min(MAX_TARGET, curr_t + 400)
             break
         curr_t = curr_t - 500
 
     while True:
         loss, row = run_once(exp_cmd, mode, pattern, curr_t)
-        if loss < 0.001:
-            curr_t = min(MAX_TARGET, curr_t + 200)
-            break
-        curr_t = curr_t - 200
-
-    while True:
-        loss, row = run_once(exp_cmd, mode, pattern, curr_t)
-        if loss < 0.001:
+        if loss < 0.02:
             return row
         curr_t = curr_t - 100
 
@@ -236,18 +250,18 @@ def run_all():
     for x in experiments:
         write_row_to_files(x)
 
-        # throughput
-        row = run_till_zero(x, 0, 0)
-        write_row_to_file(TP_FILENAME, row)
+        # # throughput
+        # row = run_till_zero(x, 0, 0)
+        # write_row_to_file(TP_FILENAME, row)
 
         # cache
         row = run_till_zero(x, 1, 0)
         write_row_to_file(CACHE_FILENAME, row)
 
 
-        # latency
-        row = run_till_zero(x, 2, 0)
-        write_row_to_file(LATENCY_FILENAME, row)
+        # # latency
+        # row = run_till_zero(x, 2, 0)
+        # write_row_to_file(LATENCY_FILENAME, row)
 
 
 
@@ -271,78 +285,57 @@ header = ["MODE", "Throughput"]
 write_row_to_file(TP_FILENAME, header)
 
 #########################
-change_ddio(1)
-change_prefetch(1)
+change_ddio(0)
+change_prefetch(0)
 #########################
 PKT_SIZE = 512
-MAX_TARGET = 17000
+MAX_TARGET = 30000
 
 experiments = [
-    # Write every cache line
-    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U', '16384','-B','-a'],
-    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U', '16384','-B','-a','-W'],
-
-    # Interrupt mode
-    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U', '16384','-a'],
-    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U', '16384','-a','-W'],
+    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U', '16384','-B','-a','-C','-u'],
+    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U', '16384','-B','-a','-C','-u','-W'],
 ]
 
-run_all()
-
-
-
-PKT_SIZE = 512
-MAX_TARGET = 35000
-
-experiments = [
-
-    # Unaligned mode
-    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U', '16384','-B','-a','-u'],
-    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U', '16384','-B','-a','-u','-W'],
-
-]
-
-run_all()
-
-
-
-PKT_SIZE = 512
-MAX_TARGET = 38000
-
-experiments=[
-    # mac,first cache line
-    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-B'],
-    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-B','-W'],
-    ]
-
-run_all()
-
+# run_all()
 
 PKT_SIZE = 256
-MAX_TARGET = 10000
+MAX_TARGET = 20000
 
 experiments = [
 
     # 256 B packet
-    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-B','-s','256','-a'],
-    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-B','-s','256','-a','-W'],
+    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-B','-s','256','-a','-u','-C'],
+    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-B','-s','256','-a','-u','-C','-W'],
+    ]
+
+
+# run_all()
+
+PKT_SIZE = 256
+MAX_TARGET = 38000
+
+experiments = [
+
+    # 256 B packet
+    ['sudo', APP_PATH, '-i', IFNAME, '-U','16384','-s','256','-a','-u','-C'],
+    ['sudo', APP_PATH, '-i', IFNAME, '-U','16384','-s','256','-a','-u','-C','-W'],
     ]
 
 
 run_all()
 
 PKT_SIZE = 64
-MAX_TARGET = 6000
+MAX_TARGET = 10000
 
 experiments = [
 
     # 64 B packet
-    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-B','-s','64','-a'],
-    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-B','-s','64','-a','-W'],
+    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-B','-s','64','-a','-u','-C'],
+    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-B','-s','64','-a','-u','-C','-W'],
 
     ]
 
 
-run_all()
+# run_all()
 
 
