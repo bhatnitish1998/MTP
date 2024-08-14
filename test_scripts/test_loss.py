@@ -17,7 +17,6 @@ APP_PATH = f'/home/preeti/nitish/MTP/bpf/AF_XDP/{APP_NAME}'
 LATENCY_FILENAME = 'latency_results.csv'
 CACHE_FILENAME = 'cache_results.csv'
 TP_FILENAME = 'tp_results.csv'
-
 EXP_TIME = 30
 
 PERF_COUNTERS = ['LLC-loads', 'LLC-load-misses', 'LLC-stores', 'LLC-store-misses',
@@ -26,8 +25,19 @@ PERF_COUNTERS = ['LLC-loads', 'LLC-load-misses', 'LLC-stores', 'LLC-store-misses
                  'instructions']
 
 MLC_ON = 1
-MLC_START_CORE = 2
+MLC_START_CORE = 9
 INT_CORE = 2 # bit corresponds to core
+LOSS = 0.02
+RX_RING_SIZE = 512
+
+# raises exception if ring size didnt change
+def set_rx_ring_size():
+    try:
+        command = f"sudo ethtool -G ens261f1 rx {RX_RING_SIZE}"
+        subprocess.run(['sudo', 'bash', '-c', command], check=True)
+    except:
+        pass
+
 
 def kill_mlc():
     cmd = ['sudo', 'killall', '-SIGINT', 'mlc']
@@ -227,21 +237,21 @@ def run_till_zero(exp_cmd, mode, pattern):
 
     while True:
         loss, row = run_once(exp_cmd, mode, pattern, curr_t)
-        if loss < 0.02:
+        if loss < LOSS:
             curr_t = min(MAX_TARGET, curr_t + 1500)
             break
         curr_t = curr_t - 2000
 
     while True:
         loss, row = run_once(exp_cmd, mode, pattern, curr_t)
-        if loss < 0.02:
+        if loss < LOSS:
             curr_t = min(MAX_TARGET, curr_t + 400)
             break
         curr_t = curr_t - 500
 
     while True:
         loss, row = run_once(exp_cmd, mode, pattern, curr_t)
-        if loss < 0.02:
+        if loss < LOSS:
             return row
         curr_t = curr_t - 100
 
@@ -285,57 +295,31 @@ header = ["MODE", "Throughput"]
 write_row_to_file(TP_FILENAME, header)
 
 #########################
-change_ddio(0)
-change_prefetch(0)
+change_ddio(1)
+change_prefetch(1)
 #########################
-PKT_SIZE = 512
-MAX_TARGET = 30000
-
-experiments = [
-    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U', '16384','-B','-a','-C','-u'],
-    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U', '16384','-B','-a','-C','-u','-W'],
-]
-
-# run_all()
 
 PKT_SIZE = 256
-MAX_TARGET = 20000
+MAX_TARGET = 28000
+RX_RING_SIZE = 512
+set_rx_ring_size()
 
 experiments = [
 
     # 256 B packet
-    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-B','-s','256','-a','-u','-C'],
-    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-B','-s','256','-a','-u','-C','-W'],
+    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-s','256','-a','-u','-C'],
+    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-s','256','-a','-u','-C','-W'],
     ]
-
-
-# run_all()
-
-PKT_SIZE = 256
-MAX_TARGET = 38000
-
-experiments = [
-
-    # 256 B packet
-    ['sudo', APP_PATH, '-i', IFNAME, '-U','16384','-s','256','-a','-u','-C'],
-    ['sudo', APP_PATH, '-i', IFNAME, '-U','16384','-s','256','-a','-u','-C','-W'],
-    ]
-
 
 run_all()
 
-PKT_SIZE = 64
-MAX_TARGET = 10000
 
 experiments = [
 
-    # 64 B packet
-    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-B','-s','64','-a','-u','-C'],
-    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-B','-s','64','-a','-u','-C','-W'],
-
+    # 256 B packet
+    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-s','256','-u','-C'],
+    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-s','256','-u','-C','-W'],
     ]
 
-
-# run_all()
-
+run_all()
 
