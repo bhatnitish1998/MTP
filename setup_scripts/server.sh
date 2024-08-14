@@ -5,5 +5,5 @@ do
   sudo echo 0 > /sys/devices/system/cpu/cpu$i/online
 done
 
-sudo ethtool -L ens261f1 combined 1
-sudo ifconfig ens261f1 192.168.201.5/24
+sudo ethtool -L ens19f0np0 combined 1
+sudo ifconfig ens19f0np0 192.168.201.5/24
