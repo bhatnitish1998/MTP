@@ -154,7 +154,9 @@ static u64 prev_addr = 0;
 static u64 out_of_order = 0;
 
 static bool opt_access_packet = false;
+static bool opt_read_packet = false;
 
+static int dummy_count;
 /////////////// Warm buffers & addresses  ////////////
 static bool opt_warm_buffers = false;
 
@@ -402,6 +404,8 @@ void post_exp_process()
 			fprintf(file, "rx_queue_full,%lu\n",xsks[i]->ring_stats.rx_full_npkts);
 			fprintf(file, "fill_ring_empty,%lu\n",xsks[i]->ring_stats.rx_fill_empty_npkts);
 			fprintf(file, "out_of_order,%llu\n",out_of_order-(xsks[i]->ring_stats.rx_npkts/umem_size));
+			// Write dummy count to avoid compiler optimization
+			fprintf(file, "dummy_count,%d\n",dummy_count);
 		}
 	}
 	fclose(file);
@@ -411,6 +415,7 @@ void post_exp_process()
 
 	if(DEBUG_ADDRESS)
 		debug_addresses();
+
 }
 
 static void remove_xdp_program(void)
@@ -517,6 +522,16 @@ static void inline process_packet(void *data, size_t length, u64 addr)
 		unsigned char *pkt = (unsigned char *)data;
 		for(int i =0; i< length; i+=64)
 			pkt[i] = 'x';
+	}
+	if(opt_read_packet)
+	{
+		unsigned char *pkt = (unsigned char *)data;
+		for(int i =0; i<length;i+=64)
+		{
+			if(pkt[i]=='a')
+				dummy_count++;
+		}
+
 	}
 }
 
@@ -659,6 +674,7 @@ static struct option long_options[] = {
 	{"Warm-buffers", no_argument, 0, 'W'},
 	{"packet-size", required_argument, 0, 's'},
 	{"Complete-umem", no_argument, 0, 'C'},
+	{"read-packet", no_argument, 0, 'r'},
 	{0, 0, 0, 0}
 };
 
@@ -693,6 +709,7 @@ static void usage(const char *prog)
 		"  -W, --Warm-buffers      Use recently read buffers first.\n"
 		"  -s, --packet-size=n   Specify the incoming packet size for better unaligned mode.\n"
 		"  -C, --Complete-umem   Use entire umem in unaligned mode. Extend fill queue as needed\n"
+		"  -r, --read-packet   read every cache line \n"
 		"\n";
 	fprintf(stderr, str, prog, opt_xsk_frame_size,
 		opt_batch_size, MIN_PKT_SIZE, MIN_PKT_SIZE,
@@ -710,7 +727,7 @@ static void parse_command_line(int argc, char **argv)
 
 	for (;;) {
 		c = getopt_long(argc, argv,
-				"i:q:pSNn:w:O:czf:muMd:b:BLU:ahWs:C",
+				"i:q:pSNn:w:O:czf:muMd:b:BLU:ahWs:Cr",
 				long_options, &option_index);
 		if (c == -1)
 			break;
@@ -804,7 +821,9 @@ static void parse_command_line(int argc, char **argv)
 		case 'C':
 			opt_complete_umem = 1;
 			break;
-
+		case 'r':
+			opt_read_packet = 1;
+			break;
 		default:
 			usage(basename(argv[0]));
 		}

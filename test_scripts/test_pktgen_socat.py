@@ -33,7 +33,7 @@ PERF_COUNTERS = ['LLC-loads', 'LLC-load-misses', 'LLC-stores', 'LLC-store-misses
 MLC_ON = 0
 MLC_START_CORE = 9
 INT_CORE = 2 # bit corresponds to core
-LOSS = 0.02
+LOSS = 0.001
 
 
 
@@ -45,6 +45,10 @@ def set_rx_ring_size(rx_size):
     except:
         pass
 
+def set_rss():
+    cmd = f"ethtool -X ens19f0np0 start 0 equal 1"
+    subprocess.run(['sudo', 'bash', '-c', cmd], check=True)
+
 
 def kill_mlc():
     cmd = ['sudo', 'killall', '-SIGINT', 'mlc']
@@ -54,6 +58,7 @@ def start_mlc():
     cmd = [f'/home/magnus/nitish/MTP/MLC/mlc', '-c11', f'-k{MLC_START_CORE}-10', f'-t{EXP_TIME+15}']
     print(cmd)
     mlc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    time.sleep(3)
 
 
 def get_pktgen_stats():
@@ -70,8 +75,9 @@ def change_ddio(value):
     ret = subprocess.run(cmd)
 
 def set_interrupts_core():
-    command = f"echo {INT_CORE} > /proc/irq/144/smp_affinity"
-    subprocess.run(['sudo', 'bash', '-c', command], check=True)
+    for i in range(144,192):
+        command = f"echo {INT_CORE} > /proc/irq/{i}/smp_affinity"
+        subprocess.run(['sudo', 'bash', '-c', command], check=True)
 
 
 def kill_process():
@@ -133,7 +139,6 @@ def run_once(exp_cmd, mode, curr_t, pkt_size, duration, pktgen):
 
     # setup
     flushllc = subprocess.run(['/home/magnus/nitish/MTP/cache/flush'], capture_output=True, text=True)
-    set_interrupts_core()
     if MLC_ON:
         start_mlc()
 
@@ -155,8 +160,8 @@ def run_once(exp_cmd, mode, curr_t, pkt_size, duration, pktgen):
         perf_res = subprocess.Popen(perf, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
 
     # wait for pktgen
-    pktgen.expect('run-done')
-
+    pktgen.expect('run-done',timeout = 120)
+    time.sleep(1)
     # terminate processes
     kill_process()
     if MLC_ON:
@@ -167,7 +172,7 @@ def run_once(exp_cmd, mode, curr_t, pkt_size, duration, pktgen):
     rx_pkts = get_rcvd_pkts()
     if tx_pkts != 0:
         loss = (tx_pkts - rx_pkts) / tx_pkts
-    else
+    else:
         loss = 1
 
     #Get xdp stats
@@ -195,7 +200,7 @@ def run_once(exp_cmd, mode, curr_t, pkt_size, duration, pktgen):
         tail99_latency = latency_values[4]
         tail999_latency = latency_values[5]
 
-        row = [" ", tx_pkts, rx_pkts, formatted_loss, curr_t, rate, rx_dropped, rx_invalid, rx_queue_full,
+        row = [" ", tx_pkts, rx_pkts, formatted_loss, curr_t, rx_dropped, rx_invalid, rx_queue_full,
                rx_fill_ring_empty, out_of_order, count_latency, min_latency, max_latency, avg_latency, tail99_latency,
                tail999_latency]
 
@@ -230,7 +235,7 @@ def run_once(exp_cmd, mode, curr_t, pkt_size, duration, pktgen):
             L2_pf_hit_percent = f"{(l2_rqsts_l2_pf_hit / l2_rqsts_all_pf) * 100:.4f}"
             L2_pf_miss_percent = f"{(l2_rqsts_l2_pf_miss / l2_rqsts_all_pf) * 100:.4f}"
 
-        row = [" ", tx_pkts, rx_pkts, formatted_loss, curr_t, rate, rx_dropped, rx_invalid, rx_queue_full,
+        row = [" ", tx_pkts, rx_pkts, formatted_loss, curr_t, rx_dropped, rx_invalid, rx_queue_full,
                rx_fill_ring_empty, out_of_order, LLC_loads, LLC_load_misses, LLC_stores, LLC_store_misses,
                L1_dcache_loads, L1_dcache_load_misses, L1_dcache_stores, L1_icache_misses, l2_rqsts_references,
                l2_rqsts_miss, l2_rqsts_all_pf, l2_rqsts_l2_pf_hit, l2_rqsts_l2_pf_miss, instructions,
@@ -239,17 +244,27 @@ def run_once(exp_cmd, mode, curr_t, pkt_size, duration, pktgen):
         write_row_to_file(CACHE_FILENAME,row)
 
     if mode == 0:
-        row = [" ", curr_t]
+        row = [" ",tx_pkts, rx_pkts, formatted_loss, curr_t, rx_dropped, rx_invalid, rx_queue_full,
+               rx_fill_ring_empty, out_of_order]
+        write_row_to_file(TP_FILENAME,row)
     
     # Clear pktgen statistics
     pktgen.sendline('cleanup()')
     pktgen.expect('cleanup-done')
+    time.sleep(1)
 
     return loss, row
 
 
 def run_till_zero(exp_cmd, mode, max_rate, pkt_size, duration, pktgen):
     curr_t = max_rate
+
+    while True:
+        loss, row = run_once(exp_cmd, mode, curr_t, pkt_size, duration, pktgen)
+        if loss < LOSS:
+            curr_t = min(max_rate, curr_t + 4)
+            break
+        curr_t = curr_t - 5
 
     while True:
         loss, row = run_once(exp_cmd, mode, curr_t, pkt_size, duration, pktgen)
@@ -293,12 +308,12 @@ def run_all(experiments, max_rate, pkt_size, duration, pktgen):
 #########################################################
 # Write header
 
-# header = ["MODE", 'tx_pkts', 'rx_pkts', 'loss %', 'curr_t', 'rate', 'rx_dropped', 'rx_invalid', 'rx_queue_full',
+# header = ["MODE", 'tx_pkts', 'rx_pkts', 'loss %', 'curr_t', 'rx_dropped', 'rx_invalid', 'rx_queue_full',
 #           'rx_fill_ring_empty', 'out_of_order', 'count_latency', 'min_latency', 'max_latency', 'avg_latency',
 #           'tail99_latency', 'tail999_latency']
 # write_row_to_file(LATENCY_FILENAME, header)
 
-# header = ["MODE", 'tx_pkts', 'rx_pkts', 'formatted_loss', 'curr_t', 'rate', 'rx_dropped', 'rx_invalid', 'rx_queue_full',
+# header = ["MODE", 'tx_pkts', 'rx_pkts', 'formatted_loss', 'curr_t',  'rx_dropped', 'rx_invalid', 'rx_queue_full',
 #           'rx_fill_ring_empty', 'out_of_order', 'LLC_loads', 'LLC_load_misses', 'LLC_stores', 'LLC_store_misses',
 #           'L1_dcache_loads', 'L1_dcache_load_misses', 'L1_dcache_stores', 'L1_icache_misses', 'l2_rqsts_references',
 #           'l2_rqsts_miss', 'l2_rqsts_all_pf', 'l2_rqsts_l2_pf_hit', 'l2_rqsts_l2_pf_miss', 'instructions',
@@ -306,7 +321,8 @@ def run_all(experiments, max_rate, pkt_size, duration, pktgen):
 #           'L2_pf_hit_percent', 'L2_pf_miss_percent']
 # write_row_to_file(CACHE_FILENAME, header)
 
-header = ["MODE", "Throughput"]
+header = ["MODE", 'tx_pkts', 'rx_pkts', 'loss %', 'curr_t', 'rx_dropped', 'rx_invalid', 'rx_queue_full',
+           'rx_fill_ring_empty', 'out_of_order']
 write_row_to_file(TP_FILENAME, header)
 
 ############################################################
@@ -320,18 +336,32 @@ pktgen.sendline('f()')
 time.sleep(1)
 pktgen.sendline('setup()')
 pktgen.expect('setup-done')
+time.sleep(1)
 
 
 ##############################################################
 change_ddio(1)
-set_rx_ring_size(512)
+set_rx_ring_size(2048)
+set_interrupts_core()
+set_rss()
 ##############################################################
 
-experiments = [
 
-    # 256 B packet
-    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-s','256','-a','-u','-C'],
-    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-s','256','-a','-u','-C','-W'],
+myrow=["Ring size 512"]
+write_row_to_file(TP_FILENAME, myrow)
+
+
+
+experiments = [
+    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-s','512','-B'],
+    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-s','512','-W','-B'],
     ]
+
 # args: experiments, max_rate(%), pkt_size(bytes), duration(ms), pktgen (pexpect spawn)
-run_all(experiments, 1, 256, 10000, pktgen)
+run_all(experiments, 80, 512, 30000, pktgen)
+
+
+# set_rx_ring_size(2048)
+
+
+
