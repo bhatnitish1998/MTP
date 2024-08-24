@@ -169,7 +169,11 @@ struct addr_info{
 #define MAX_ADDRESS_COUNT 1000000
 struct addr_info addr_array[MAX_ADDRESS_COUNT];
 static int addr_count =0;
-//////////////////////////////////////////////////////
+///////////////// Software Prefetching //////////////
+
+static bool opt_spf = false;
+
+/////////////////////////////////////////////////////
 struct xsk_ring_stats {
 	unsigned long rx_frags;
 	unsigned long rx_npkts;
@@ -323,6 +327,22 @@ void compute_latencies()
     }
     fprintf(file, "%d,%lld,%lld,%.2f,%.2f,%.2f\n",latency_count, min_latency, max_latency, average_latency, tail_latency_99, tail_latency_999);
     fclose(file);
+}
+
+static void inline prefetch_packet(void* addr)
+{
+	char *pkt = (char*)addr;
+	__builtin_prefetch(&pkt[0],1,1);
+
+	if(opt_access_packet || opt_read_packet){
+		for(int i =1; i< opt_packet_size; i+=64)
+		{	
+			if(opt_access_packet)
+			__builtin_prefetch(&pkt[i],1,3);
+			else
+			__builtin_prefetch(&pkt[i],0,3);
+		}
+	}
 }
 
 //////////////////////////////////////////////////////
@@ -675,6 +695,7 @@ static struct option long_options[] = {
 	{"packet-size", required_argument, 0, 's'},
 	{"Complete-umem", no_argument, 0, 'C'},
 	{"read-packet", no_argument, 0, 'r'},
+	{"soft-pf", no_argument, 0, 'P'},
 	{0, 0, 0, 0}
 };
 
@@ -710,6 +731,7 @@ static void usage(const char *prog)
 		"  -s, --packet-size=n   Specify the incoming packet size for better unaligned mode.\n"
 		"  -C, --Complete-umem   Use entire umem in unaligned mode. Extend fill queue as needed\n"
 		"  -r, --read-packet   read every cache line \n"
+		"  -P, --soft-pf   Software prefetch next buffers \n"
 		"\n";
 	fprintf(stderr, str, prog, opt_xsk_frame_size,
 		opt_batch_size, MIN_PKT_SIZE, MIN_PKT_SIZE,
@@ -727,7 +749,7 @@ static void parse_command_line(int argc, char **argv)
 
 	for (;;) {
 		c = getopt_long(argc, argv,
-				"i:q:pSNn:w:O:czf:muMd:b:BLU:ahWs:Cr",
+				"i:q:pSNn:w:O:czf:muMd:b:BLU:ahWs:CrP",
 				long_options, &option_index);
 		if (c == -1)
 			break;
@@ -824,6 +846,9 @@ static void parse_command_line(int argc, char **argv)
 		case 'r':
 			opt_read_packet = 1;
 			break;
+		case 'P':
+			opt_spf = 1;
+			break;
 		default:
 			usage(basename(argv[0]));
 		}
@@ -888,8 +913,16 @@ static void receive(struct xsk_socket_info *xsk)
 		addr = xsk_umem__add_offset_to_addr(addr);
 		char *pkt = xsk_umem__get_data(xsk->umem->buffer, addr);
 
-		if (!nb_frags++)
+		if (!nb_frags++){
 			process_packet(pkt,len,addr);
+
+			if(opt_spf){
+				const struct xdp_desc *desc = xsk_ring_cons__rx_desc(&xsk->rx, (idx_rx+1));
+				u64 addr = desc->addr;
+				char *pkt = xsk_umem__get_data(xsk->umem->buffer, addr);
+				prefetch_packet(pkt);
+			}
+		}
 
 		if(DEBUG_ADDRESS){
 			addr_array[addr_count].number = i;
@@ -909,7 +942,6 @@ static void receive(struct xsk_socket_info *xsk)
 			custom_xsk_ring_prod__fill_addr(&xsk->umem->fq, idx_fq++,orig,i);
 		else
 			*xsk_ring_prod__fill_addr(&xsk->umem->fq, idx_fq++) = orig;
-		
 	}
 
 	// submit the fill queue
