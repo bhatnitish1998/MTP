@@ -75,6 +75,20 @@ def change_ddio(value):
     cmd = ['sudo', '/home/magnus/nitish/MTP/ddio/change-ddio', str(value)]
     ret = subprocess.run(cmd)
 
+# 1 = enable  0 = disable prefetch
+def change_prefetch(value):
+    if (value):
+        cmd = ['sudo', 'wrmsr', '0x1a4', '-a', '32']
+        ret = subprocess.run(cmd)
+        cmd = ['sudo', 'wrmsr', '0x6d', '-a', '1073790976']
+        ret = subprocess.run(cmd)
+    else:
+        cmd = ['sudo', 'wrmsr', '0x1a4', '-a', '47']
+        ret = subprocess.run(cmd)
+        cmd = ['sudo', 'wrmsr', '0x6d', '-a', '4399120302080']
+        ret = subprocess.run(cmd)
+
+
 def set_interrupts_core():
     for i in range(144,192):
         command = f"echo {INT_CORE} > /proc/irq/{i}/smp_affinity"
@@ -335,6 +349,7 @@ time.sleep(1)
 
 ##############################################################
 change_ddio(1)
+change_prefetch(1)
 set_rx_ring_size(512)
 set_interrupts_core()
 set_rss()
