@@ -332,7 +332,7 @@ void compute_latencies()
 static void inline prefetch_packet(void* addr)
 {
 	char *pkt = (char*)addr;
-	__builtin_prefetch(&pkt[0],1,1);
+	__builtin_prefetch(&pkt[0],1,3);
 
 	if(opt_access_packet || opt_read_packet){
 		for(int i =1; i< opt_packet_size; i+=64)
@@ -922,8 +922,6 @@ static void receive(struct xsk_socket_info *xsk)
 
 		if (!nb_frags++){
 			process_packet(pkt,len,addr);
-
-
 		}
 
 		if(DEBUG_ADDRESS){

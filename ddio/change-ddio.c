@@ -164,7 +164,7 @@ int main(int argc, char * argv[])
     int state = atoi(argv[1]);
 
     // Define nic_bus and ddio_state
-    uint8_t nic_bus=0x04;
+    uint8_t nic_bus=0x17;
     uint8_t ddio_state=state;
 
     init_pci_access();

@@ -14,7 +14,6 @@ PKTGEN = '/home/magnus/packetgen/Pktgen-DPDK/builddir/app/pktgen'
 PKTGEN_SCRIPT = '/home/magnus/nitish/MTP/pktgen_scripts/gen.lua' 
 PKTGEN_STAT = '/home/magnus/nitish/MTP/pktgen_scripts/pkt_stat.txt'
 
-
 APP_NAME = 'xdpsock'
 APP_PATH = f'/home/magnus/nitish/MTP/bpf/AF_XDP/{APP_NAME}'
 
@@ -24,15 +23,17 @@ TP_FILENAME = 'tp_results.csv'
 
 EXP_TIME = 30
 
-PERF_COUNTERS = ['LLC-loads', 'LLC-load-misses', 'LLC-stores', 'LLC-store-misses',
-                 'L1-dcache-loads', 'L1-dcache-load-misses', 'L1-dcache-stores', 'L1-icache-misses',
-                 'l2_rqsts.references', 'l2_rqsts.miss', 'l2_rqsts.all_pf', 'l2_rqsts.l2_pf_hit', 'l2_rqsts.l2_pf_miss',
-                 'instructions']
+PERF_COUNTERS = ['L2_RQSTS.REFERENCES', 'L2_RQSTS.MISS', 'LONGEST_LAT_CACHE.REFERENCE', 'LONGEST_LAT_CACHE.MISS',
+                 'INST_RETIRED.ANY', 'L1D.HWPF_MISS', 'L2_RQSTS.ALL_HWPF', 'L2_RQSTS.HWPF_MISS', 'L2_TRANS.L2_WB',
+                 'L2_LINES_IN.ALL', 'L2_LINES_OUT.NON_SILENT', 'L2_LINES_OUT.SILENT', 'OCR.HWPF_L3.L3_HIT', 
+                 'OCR.HWPF_L3.L3_MISS', 'L2_RQSTS.SWPF_HIT', 'L2_RQSTS.SWPF_MISS', 'SW_PREFETCH_ACCESS.ANY', 
+                 'SW_PREFETCH_ACCESS.T0', 'SW_PREFETCH_ACCESS.T1_T2',
+                ]
 
                 
 MLC_ON = 0
 MLC_START_CORE = 9
-INT_CORE = 2 # bit corresponds to core
+INT_CORE = 1 # bit corresponds to core
 LOSS = 0.001
 
 
@@ -208,39 +209,32 @@ def run_once(exp_cmd, mode, curr_t, pkt_size, duration, pktgen):
         # Parse cache statistics
         ret = perf_res.stderr.read()
         reslines = ret.splitlines()
-        LLC_loads = int(reslines[3].split()[0])
-        LLC_load_misses = int(reslines[4].split()[0])
-        LLC_stores = int(reslines[5].split()[0])
-        LLC_store_misses = int(reslines[6].split()[0])
-        L1_dcache_loads = int(reslines[7].split()[0])
-        L1_dcache_load_misses = int(reslines[8].split()[0])
-        L1_dcache_stores = int(reslines[9].split()[0])
-        L1_icache_misses = int(reslines[10].split()[0])
-        l2_rqsts_references = int(reslines[11].split()[0])
-        l2_rqsts_miss = int(reslines[12].split()[0])
-        l2_rqsts_all_pf = int(reslines[13].split()[0])
-        l2_rqsts_l2_pf_hit = int(reslines[14].split()[0])
-        l2_rqsts_l2_pf_miss = int(reslines[15].split()[0])
-        instructions = int(reslines[16].split()[0])
+        L2_RQSTS_REFERENCES = int(reslines[3].split()[0])
+        L2_RQSTS_MISS = int(reslines[4].split()[0])
+        LONGEST_LAT_CACHE_REFERENCE = int(reslines[5].split()[0])
+        LONGEST_LAT_CACHE_MISS = int(reslines[6].split()[0])
+        INST_RETIRED_ANY = int(reslines[7].split()[0])
+        L1D_HWPF_MISS = int(reslines[8].split()[0])
+        L2_RQSTS_ALL_HWPF = int(reslines[9].split()[0])
+        L2_RQSTS_HWPF_MISS = int(reslines[10].split()[0])
+        L2_TRANS_L2_WB = int(reslines[11].split()[0])
+        L2_LINES_IN_ALL = int(reslines[12].split()[0])
+        L2_LINES_OUT_NON_SILENT = int(reslines[13].split()[0])
+        L2_LINES_OUT_SILENT = int(reslines[14].split()[0])
+        OCR_HWPF_L3_L3_HIT = int(reslines[15].split()[0])
+        OCR_HWPF_L3_L3_MISS = int(reslines[16].split()[0])
+        L2_RQSTS_SWPF_HIT = int(reslines[17].split()[0])
+        L2_RQSTS_SWPF_MISS = int(reslines[18].split()[0])
+        SW_PREFETCH_ACCESS_ANY = int(reslines[19].split()[0])
+        SW_PREFETCH_ACCESS_T0 = int(reslines[20].split()[0])
+        SW_PREFETCH_ACCESS_T1_T2 = int(reslines[21].split()[0])
 
-        LLC_load_miss_percent = f"{(LLC_load_misses / LLC_loads) * 100:.4f}"
-        LLC_store_miss_percent = f"{(LLC_store_misses / LLC_stores) * 100:.4f}"
-        L1_dcache_load_miss_percent = f"{(L1_dcache_load_misses / L1_dcache_loads) * 100:.4f}"
-        L2_miss_percent = f"{(l2_rqsts_miss / l2_rqsts_references) * 100:.4f}"
+        LLC_miss_percent = f"{(LONGEST_LAT_CACHE_MISS / LONGEST_LAT_CACHE_REFERENCE) * 100:.4f}"
+        L2_miss_percent = f"{(L2_RQSTS_MISS / L2_RQSTS_REFERENCES) * 100:.4f}"
 
-        if l2_rqsts_all_pf == 0:
-            L2_pf_hit_percent = 0
-            L2_pf_miss_percent = 0
-        else:
-            L2_pf_hit_percent = f"{(l2_rqsts_l2_pf_hit / l2_rqsts_all_pf) * 100:.4f}"
-            L2_pf_miss_percent = f"{(l2_rqsts_l2_pf_miss / l2_rqsts_all_pf) * 100:.4f}"
-
-        row = [" ", tx_pkts, rx_pkts, formatted_loss, curr_t, rx_dropped, rx_invalid, rx_queue_full,
-               rx_fill_ring_empty, out_of_order, LLC_loads, LLC_load_misses, LLC_stores, LLC_store_misses,
-               L1_dcache_loads, L1_dcache_load_misses, L1_dcache_stores, L1_icache_misses, l2_rqsts_references,
-               l2_rqsts_miss, l2_rqsts_all_pf, l2_rqsts_l2_pf_hit, l2_rqsts_l2_pf_miss, instructions,
-               LLC_load_miss_percent, LLC_store_miss_percent, L1_dcache_load_miss_percent, L2_miss_percent,
-               L2_pf_hit_percent, L2_pf_miss_percent]
+        row = [" ", tx_pkts, rx_pkts, formatted_loss, curr_t, rx_dropped, rx_invalid, rx_queue_full, rx_fill_ring_empty, out_of_order, LLC_miss_percent, 
+        L2_miss_percent, INST_RETIRED_ANY, L1D_HWPF_MISS, L2_RQSTS_ALL_HWPF, L2_RQSTS_HWPF_MISS, L2_TRANS_L2_WB, L2_LINES_IN_ALL, L2_LINES_OUT_NON_SILENT,
+        L2_LINES_OUT_SILENT, OCR_HWPF_L3_L3_HIT, OCR_HWPF_L3_L3_MISS, L2_RQSTS_SWPF_HIT, L2_RQSTS_SWPF_MISS, SW_PREFETCH_ACCESS_ANY, SW_PREFETCH_ACCESS_T0, SW_PREFETCH_ACCESS_T1_T2]
         write_row_to_file(CACHE_FILENAME,row)
 
     if mode == 0:
@@ -291,13 +285,13 @@ def run_all(experiments, max_rate, pkt_size, duration, pktgen):
     for x in experiments:
         write_row_to_files(x)
 
-        # throughput
-        row = run_till_zero(x, 0, max_rate, pkt_size, duration, pktgen)
-        write_row_to_file(TP_FILENAME, row)
+        # # throughput
+        # row = run_till_zero(x, 0, max_rate, pkt_size, duration, pktgen)
+        # write_row_to_file(TP_FILENAME, row)
 
-        # # cache
-        # row = run_till_zero(x, 1, max_rate, pkt_size, duration, pktgen)
-        # write_row_to_file(CACHE_FILENAME, row)
+        # cache
+        row = run_till_zero(x, 1, max_rate, pkt_size, duration, pktgen)
+        write_row_to_file(CACHE_FILENAME, row)
 
 
         # # latency
@@ -313,17 +307,17 @@ def run_all(experiments, max_rate, pkt_size, duration, pktgen):
 #           'tail99_latency', 'tail999_latency']
 # write_row_to_file(LATENCY_FILENAME, header)
 
-# header = ["MODE", 'tx_pkts', 'rx_pkts', 'formatted_loss', 'curr_t',  'rx_dropped', 'rx_invalid', 'rx_queue_full',
-#           'rx_fill_ring_empty', 'out_of_order', 'LLC_loads', 'LLC_load_misses', 'LLC_stores', 'LLC_store_misses',
-#           'L1_dcache_loads', 'L1_dcache_load_misses', 'L1_dcache_stores', 'L1_icache_misses', 'l2_rqsts_references',
-#           'l2_rqsts_miss', 'l2_rqsts_all_pf', 'l2_rqsts_l2_pf_hit', 'l2_rqsts_l2_pf_miss', 'instructions',
-#           'LLC_load_miss_percent', 'LLC_store_miss_percent', 'L1_dcache_load_miss_percent', 'L2_miss_percent',
-#           'L2_pf_hit_percent', 'L2_pf_miss_percent']
-# write_row_to_file(CACHE_FILENAME, header)
 
-header = ["MODE", 'tx_pkts', 'rx_pkts', 'loss %', 'curr_t', 'rx_dropped', 'rx_invalid', 'rx_queue_full',
-           'rx_fill_ring_empty', 'out_of_order']
-write_row_to_file(TP_FILENAME, header)
+    row = []
+    write_row_to_file(CACHE_FILENAME,row)
+header = ["MODE", 'tx_pkts', 'rx_pkts', 'formatted_loss', 'curr_t',  'rx_dropped', 'rx_invalid', 'rx_queue_full',
+          'rx_fill_ring_empty', 'out_of_order', 'LLC_miss_percent','L2_miss_percent','INST_RETIRED_ANY','L1D_HWPF_MISS','L2_RQSTS_ALL_HWPF', 'L2_RQSTS_HWPF_MISS', 'L2_TRANS_L2_WB', 'L2_LINES_IN_ALL', 'L2_LINES_OUT_NON_SILENT',
+    'L2_LINES_OUT_SILENT', 'OCR_HWPF_L3_L3_HIT', 'OCR_HWPF_L3_L3_MISS', 'L2_RQSTS_SWPF_HIT', 'L2_RQSTS_SWPF_MISS', 'SW_PREFETCH_ACCESS_ANY', 'SW_PREFETCH_ACCESS_T0', 'SW_PREFETCH_ACCESS_T1_T2']
+write_row_to_file(CACHE_FILENAME, header)
+
+# header = ["MODE", 'tx_pkts', 'rx_pkts', 'loss %', 'curr_t', 'rx_dropped', 'rx_invalid', 'rx_queue_full',
+#            'rx_fill_ring_empty', 'out_of_order']
+# write_row_to_file(TP_FILENAME, header)
 
 ############################################################
 
@@ -341,7 +335,7 @@ time.sleep(1)
 
 ##############################################################
 change_ddio(1)
-set_rx_ring_size(2048)
+set_rx_ring_size(512)
 set_interrupts_core()
 set_rss()
 ##############################################################
@@ -351,17 +345,12 @@ myrow=["Ring size 512"]
 write_row_to_file(TP_FILENAME, myrow)
 
 
-
 experiments = [
-    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-s','512','-B'],
-    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-s','512','-W','-B'],
+    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-s','512','-B','-a'],
+    # ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-s','512','-P','-B','-a'],
+    # ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-s','512','-W','-B','-a'],
+    # ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-s','512','-P','-W','-B','-a'],
     ]
 
 # args: experiments, max_rate(%), pkt_size(bytes), duration(ms), pktgen (pexpect spawn)
-run_all(experiments, 80, 512, 30000, pktgen)
-
-
-# set_rx_ring_size(2048)
-
-
-
+run_all(experiments, 70, 512, 10000, pktgen)
