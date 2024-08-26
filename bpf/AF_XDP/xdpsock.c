@@ -913,15 +913,17 @@ static void receive(struct xsk_socket_info *xsk)
 		addr = xsk_umem__add_offset_to_addr(addr);
 		char *pkt = xsk_umem__get_data(xsk->umem->buffer, addr);
 
+		if(opt_spf){
+			const struct xdp_desc *desc = xsk_ring_cons__rx_desc(&xsk->rx, (idx_rx+1));
+			u64 addr = desc->addr;
+			char *pkt = xsk_umem__get_data(xsk->umem->buffer, addr);
+			prefetch_packet(pkt);
+	}
+
 		if (!nb_frags++){
 			process_packet(pkt,len,addr);
 
-			if(opt_spf){
-				const struct xdp_desc *desc = xsk_ring_cons__rx_desc(&xsk->rx, (idx_rx+1));
-				u64 addr = desc->addr;
-				char *pkt = xsk_umem__get_data(xsk->umem->buffer, addr);
-				prefetch_packet(pkt);
-			}
+
 		}
 
 		if(DEBUG_ADDRESS){
