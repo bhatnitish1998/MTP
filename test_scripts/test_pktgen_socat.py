@@ -247,7 +247,7 @@ def run_once(exp_cmd, mode, curr_t, pkt_size, duration, pktgen):
         L2_miss_percent = f"{(L2_RQSTS_MISS / L2_RQSTS_REFERENCES) * 100:.4f}"
 
         row = [" ", tx_pkts, rx_pkts, formatted_loss, curr_t, rx_dropped, rx_invalid, rx_queue_full, rx_fill_ring_empty, out_of_order, LLC_miss_percent, 
-        L2_miss_percent, INST_RETIRED_ANY, L1D_HWPF_MISS, L2_RQSTS_ALL_HWPF, L2_RQSTS_HWPF_MISS, L2_TRANS_L2_WB, L2_LINES_IN_ALL, L2_LINES_OUT_NON_SILENT,
+        L2_miss_percent, L2_RQSTS_REFERENCES, L2_RQSTS_MISS, LONGEST_LAT_CACHE_REFERENCE, LONGEST_LAT_CACHE_MISS, INST_RETIRED_ANY, L1D_HWPF_MISS, L2_RQSTS_ALL_HWPF, L2_RQSTS_HWPF_MISS, L2_TRANS_L2_WB, L2_LINES_IN_ALL, L2_LINES_OUT_NON_SILENT,
         L2_LINES_OUT_SILENT, OCR_HWPF_L3_L3_HIT, OCR_HWPF_L3_L3_MISS, L2_RQSTS_SWPF_HIT, L2_RQSTS_SWPF_MISS, SW_PREFETCH_ACCESS_ANY, SW_PREFETCH_ACCESS_T0, SW_PREFETCH_ACCESS_T1_T2]
         write_row_to_file(CACHE_FILENAME,row)
 
@@ -268,14 +268,14 @@ def run_till_zero(exp_cmd, mode, max_rate, pkt_size, duration, pktgen):
     curr_t = max_rate
 
     while True:
-        loss, row = run_once(exp_cmd, mode, curr_t, pkt_size, duration, pktgen)
+        loss, row = run_once(exp_cmd, mode, curr_t, pkt_size, 10000, pktgen)
         if loss < LOSS:
             curr_t = min(max_rate, curr_t + 4)
             break
         curr_t = curr_t - 5
 
     while True:
-        loss, row = run_once(exp_cmd, mode, curr_t, pkt_size, duration, pktgen)
+        loss, row = run_once(exp_cmd, mode, curr_t, pkt_size, 10000, pktgen)
         if loss < LOSS:
             curr_t = min(max_rate, curr_t + 1.5)
             break
@@ -284,15 +284,16 @@ def run_till_zero(exp_cmd, mode, max_rate, pkt_size, duration, pktgen):
     while True:
         loss, row = run_once(exp_cmd, mode, curr_t, pkt_size, duration, pktgen)
         if loss < LOSS:
-            curr_t = min(max_rate, curr_t + 0.4)
-            break
+            # curr_t = min(max_rate, curr_t + 0.4)
+            # break
+            return row
         curr_t = curr_t - 0.5
 
-    while True:
-        loss, row = run_once(exp_cmd, mode, curr_t, pkt_size, duration, pktgen)
-        if loss < LOSS:
-            return row
-        curr_t = curr_t - 0.1
+    # while True:
+    #     loss, row = run_once(exp_cmd, mode, curr_t, pkt_size, duration, pktgen)
+    #     if loss < LOSS:
+    #         return row
+    #     curr_t = curr_t - 0.1
 
 
 def run_all(experiments, max_rate, pkt_size, duration, pktgen):
@@ -322,10 +323,8 @@ def run_all(experiments, max_rate, pkt_size, duration, pktgen):
 # write_row_to_file(LATENCY_FILENAME, header)
 
 
-    row = []
-    write_row_to_file(CACHE_FILENAME,row)
 header = ["MODE", 'tx_pkts', 'rx_pkts', 'formatted_loss', 'curr_t',  'rx_dropped', 'rx_invalid', 'rx_queue_full',
-          'rx_fill_ring_empty', 'out_of_order', 'LLC_miss_percent','L2_miss_percent','INST_RETIRED_ANY','L1D_HWPF_MISS','L2_RQSTS_ALL_HWPF', 'L2_RQSTS_HWPF_MISS', 'L2_TRANS_L2_WB', 'L2_LINES_IN_ALL', 'L2_LINES_OUT_NON_SILENT',
+          'rx_fill_ring_empty', 'out_of_order', 'LLC_miss_percent','L2_miss_percent','L2_RQSTS_REFERENCES', 'L2_RQSTS_MISS', 'LONGEST_LAT_CACHE_REFERENCE', 'LONGEST_LAT_CACHE_MISS', 'INST_RETIRED_ANY','L1D_HWPF_MISS','L2_RQSTS_ALL_HWPF', 'L2_RQSTS_HWPF_MISS', 'L2_TRANS_L2_WB', 'L2_LINES_IN_ALL', 'L2_LINES_OUT_NON_SILENT',
     'L2_LINES_OUT_SILENT', 'OCR_HWPF_L3_L3_HIT', 'OCR_HWPF_L3_L3_MISS', 'L2_RQSTS_SWPF_HIT', 'L2_RQSTS_SWPF_MISS', 'SW_PREFETCH_ACCESS_ANY', 'SW_PREFETCH_ACCESS_T0', 'SW_PREFETCH_ACCESS_T1_T2']
 write_row_to_file(CACHE_FILENAME, header)
 
@@ -348,24 +347,91 @@ time.sleep(1)
 
 
 ##############################################################
-change_ddio(1)
-change_prefetch(1)
-set_rx_ring_size(512)
+# change_ddio(1)
+# change_prefetch(1)
 set_interrupts_core()
 set_rss()
 ##############################################################
 
+# set_rx_ring_size(512)
+# time.sleep(1)
+# myrow=["Ring size 512"]
+# write_row_to_files(myrow)
 
-myrow=["Ring size 512"]
-write_row_to_file(TP_FILENAME, myrow)
+# # Only Header
+# experiments = [
+#     ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-s','64','-B',],
+#     ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-s','64','-B','-P',],
+#     ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-s','64','-B','-W',],
+#     ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-s','64','-B','-W','-P',],
+#     ]
+
+# # args: experiments, max_rate(%), pkt_size(bytes), duration(ms), pktgen (pexpect spawn)
+# run_all(experiments, 40, 64, 30000, pktgen)
+
+# # Read every line
+# experiments = [
+#     ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-s','64','-r','-B'],
+#     ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-s','64','-r','-P','-B'],
+#     ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-s','64','-r','-W','-B',],
+#     ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-s','64','-r','-W','-P','-B',],
+#     ]
+
+# # args: experiments, max_rate(%), pkt_size(bytes), duration(ms), pktgen (pexpect spawn)
+# run_all(experiments, 40, 64, 30000, pktgen)
 
 
+# # Write every line
+# experiments = [
+#     ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-s','64','-a','-B'],
+#     ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-s','64','-a','-P','-B'],
+#     ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-s','64','-a','-W','-B',],
+#     ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-s','64','-a','-W','-P','-B',],
+#     ]
+
+# # args: experiments, max_rate(%), pkt_size(bytes), duration(ms), pktgen (pexpect spawn)
+# run_all(experiments, 40, 64, 30000, pktgen)
+
+
+
+#######################################################################################################
+
+set_rx_ring_size(2048)
+time.sleep(1)
+myrow=["Ring size 2048"]
+write_row_to_files(myrow)
+
+# # Only Header
+# experiments = [
+#     ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-s','64','-B',],
+#     ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-s','64','-B','-P',],
+#     ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-s','64','-B','-W',],
+#     ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-s','64','-B','-W','-P',],
+#     ]
+
+# # args: experiments, max_rate(%), pkt_size(bytes), duration(ms), pktgen (pexpect spawn)
+# run_all(experiments, 40, 64, 30000, pktgen)
+
+# Read every line
 experiments = [
-    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-s','512','-B','-a'],
-    # ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-s','512','-P','-B','-a'],
-    # ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-s','512','-W','-B','-a'],
-    # ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-s','512','-P','-W','-B','-a'],
+    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-s','512','-r','-B'],
+    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-s','512','-r','-P','-B'],
+    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-s','512','-r','-W','-B',],
+    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-s','512','-r','-W','-P','-B',],
     ]
 
 # args: experiments, max_rate(%), pkt_size(bytes), duration(ms), pktgen (pexpect spawn)
-run_all(experiments, 70, 512, 10000, pktgen)
+run_all(experiments, 100, 512, 30000, pktgen)
+
+
+# # Write every line
+# experiments = [
+#     ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-s','64','-a','-B'],
+#     ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-s','64','-a','-P','-B'],
+#     ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-s','64','-a','-W','-B',],
+#     ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-s','64','-a','-W','-P','-B',],
+#     ]
+
+# # args: experiments, max_rate(%), pkt_size(bytes), duration(ms), pktgen (pexpect spawn)
+# run_all(experiments, 40, 64, 30000, pktgen)
+
