@@ -70,7 +70,7 @@
 
 // DEBUG VARIABLES
 #define DEBUG_LATENCY 0
-#define DEBUG_ADDRESS 0 
+#define DEBUG_ADDRESS 1 
 
 
 #define NSEC_PER_SEC		1000000000UL
@@ -165,6 +165,9 @@ struct addr_info{
 	u64 addr;
 	u32 len;
 };
+
+static int batches_not_changed =-1;
+u64 prev_consumer =0;
 
 #define MAX_ADDRESS_COUNT 1000000
 struct addr_info addr_array[MAX_ADDRESS_COUNT];
@@ -902,6 +905,15 @@ static void receive(struct xsk_socket_info *xsk)
 	}
 
 
+	// check if consumer has changed
+	u64 current_cons = *xsk->umem->fq.consumer;
+	if(current_cons == prev_consumer)
+		batches_not_changed++;
+	else
+		batches_not_changed =0;
+
+	prev_consumer = current_cons;
+
 	// process each packets and put back the addresses of buffers
 	for (i = 0; i < rcvd; i++) {
 		const struct xdp_desc *desc = xsk_ring_cons__rx_desc(&xsk->rx, idx_rx++);
@@ -939,7 +951,7 @@ static void receive(struct xsk_socket_info *xsk)
 		}
 
 		if(opt_warm_buffers)
-			custom_xsk_ring_prod__fill_addr(&xsk->umem->fq, idx_fq++,orig,i);
+			custom_xsk_ring_prod__fill_addr(&xsk->umem->fq, idx_fq++,orig,(batches_not_changed*opt_batch_size + i));
 		else
 			*xsk_ring_prod__fill_addr(&xsk->umem->fq, idx_fq++) = orig;
 	}
