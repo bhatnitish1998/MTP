@@ -33,6 +33,7 @@
 #include <time.h>
 #include <unistd.h>
 #include <sched.h>
+#include <math.h>
 
 // #include <xdp/xsk.h>
 #include "../lib/xdp-tools/headers/xdp/xsk.h"
@@ -70,7 +71,7 @@
 
 // DEBUG VARIABLES
 #define DEBUG_LATENCY 0
-#define DEBUG_ADDRESS 1 
+#define DEBUG_ADDRESS 0 
 
 
 #define NSEC_PER_SEC		1000000000UL
@@ -157,6 +158,9 @@ static bool opt_access_packet = false;
 static bool opt_read_packet = false;
 
 static int dummy_count;
+
+static bool opt_take_time = false;
+static int dummy_primes = 0;
 /////////////// Warm buffers & addresses  ////////////
 static bool opt_warm_buffers = false;
 
@@ -251,6 +255,31 @@ static int num_socks;
 struct xsk_socket_info *xsks[MAX_SOCKS];
 int sock;
 
+////////////// Processing time functions /////////////
+
+static bool inline  is_prime(long long num) {
+    if (num <= 1) return false;
+    if (num == 2 || num == 3) return true;
+    if (num % 2 == 0 || num % 3 == 0) return false;
+
+    for (long long i = 5; i <= num/2; i += 6) {
+        if (num % i == 0 || num % (i + 2) == 0) return false;
+    }
+    return true;
+}
+
+static int inline get_prime_count(long long limit){
+
+	int counts=0;
+	for(long long i=1; i<limit;i++)
+	{
+		if(is_prime(i))
+			counts++;
+	}
+
+	return counts;
+}
+
 ///////////// Latency related functions //////////////
 void merge(u64 arr[], int low, int mid, int high)
 {
@@ -293,7 +322,6 @@ void merge_sort(u64 v[], int low, int high)
 
 void compute_latencies()
 {
-
 
 	if(DEBUG_LATENCY)
 	{
@@ -429,6 +457,7 @@ void post_exp_process()
 			fprintf(file, "out_of_order,%llu\n",out_of_order-(xsks[i]->ring_stats.rx_npkts/umem_size));
 			// Write dummy count to avoid compiler optimization
 			fprintf(file, "dummy_count,%d\n",dummy_count);
+			fprintf(file, "dummy_primes,%d\n",dummy_primes);
 		}
 	}
 	fclose(file);
@@ -556,6 +585,8 @@ static void inline process_packet(void *data, size_t length, u64 addr)
 		}
 
 	}
+	if(opt_take_time)
+		dummy_primes+=get_prime_count(40);
 }
 
 
@@ -699,6 +730,7 @@ static struct option long_options[] = {
 	{"Complete-umem", no_argument, 0, 'C'},
 	{"read-packet", no_argument, 0, 'r'},
 	{"soft-pf", no_argument, 0, 'P'},
+	{"take-time", no_argument, 0, 't'},
 	{0, 0, 0, 0}
 };
 
@@ -735,6 +767,7 @@ static void usage(const char *prog)
 		"  -C, --Complete-umem   Use entire umem in unaligned mode. Extend fill queue as needed\n"
 		"  -r, --read-packet   read every cache line \n"
 		"  -P, --soft-pf   Software prefetch next buffers \n"
+		"  -t, --take-time   Add packet processing time. \n"
 		"\n";
 	fprintf(stderr, str, prog, opt_xsk_frame_size,
 		opt_batch_size, MIN_PKT_SIZE, MIN_PKT_SIZE,
@@ -752,7 +785,7 @@ static void parse_command_line(int argc, char **argv)
 
 	for (;;) {
 		c = getopt_long(argc, argv,
-				"i:q:pSNn:w:O:czf:muMd:b:BLU:ahWs:CrP",
+				"i:q:pSNn:w:O:czf:muMd:b:BLU:ahWs:CrPt",
 				long_options, &option_index);
 		if (c == -1)
 			break;
@@ -851,6 +884,9 @@ static void parse_command_line(int argc, char **argv)
 			break;
 		case 'P':
 			opt_spf = 1;
+			break;
+		case 't':
+			opt_take_time = 1;
 			break;
 		default:
 			usage(basename(argv[0]));
