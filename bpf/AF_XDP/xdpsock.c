@@ -173,9 +173,14 @@ struct addr_info{
 static int batches_not_changed =-1;
 u64 prev_consumer =0;
 
-#define MAX_ADDRESS_COUNT 1000000
+#define MAX_ADDRESS_COUNT 32769
 struct addr_info addr_array[MAX_ADDRESS_COUNT];
 static int addr_count =0;
+
+
+static bool opt_debug_addr = false;
+static const char *addr_file = "";
+char addr_file_path[256];
 ///////////////// Software Prefetching //////////////
 
 static bool opt_spf = false;
@@ -428,7 +433,7 @@ static int xsk_get_xdp_stats(int fd, struct xsk_socket_info *xsk)
 
 static void  debug_addresses()
 {
-		FILE *file = fopen("./logs/addresses_info.txt", "a");
+		FILE *file = fopen(addr_file_path, "a");
 		if (file == NULL) {
 			perror("Error opening file");
 		}
@@ -465,7 +470,7 @@ void post_exp_process()
 	if(opt_measure_latency)
 		compute_latencies();
 
-	if(DEBUG_ADDRESS)
+	if(opt_debug_addr)
 		debug_addresses();
 
 }
@@ -731,6 +736,7 @@ static struct option long_options[] = {
 	{"read-packet", no_argument, 0, 'r'},
 	{"soft-pf", no_argument, 0, 'P'},
 	{"take-time", no_argument, 0, 't'},
+	{"debug-addr", required_argument, 0, 'D'},
 	{0, 0, 0, 0}
 };
 
@@ -768,6 +774,7 @@ static void usage(const char *prog)
 		"  -r, --read-packet   read every cache line \n"
 		"  -P, --soft-pf   Software prefetch next buffers \n"
 		"  -t, --take-time   Add packet processing time. \n"
+		"  -D, --debug-addr=file	Write addresses to file \n"
 		"\n";
 	fprintf(stderr, str, prog, opt_xsk_frame_size,
 		opt_batch_size, MIN_PKT_SIZE, MIN_PKT_SIZE,
@@ -785,7 +792,7 @@ static void parse_command_line(int argc, char **argv)
 
 	for (;;) {
 		c = getopt_long(argc, argv,
-				"i:q:pSNn:w:O:czf:muMd:b:BLU:ahWs:CrPt",
+				"i:q:pSNn:w:O:czf:muMd:b:BLU:ahWs:CrPtD:",
 				long_options, &option_index);
 		if (c == -1)
 			break;
@@ -888,6 +895,10 @@ static void parse_command_line(int argc, char **argv)
 		case 't':
 			opt_take_time = 1;
 			break;
+		case 'D':
+			opt_debug_addr =1;
+			addr_file = optarg;
+			break;
 		default:
 			usage(basename(argv[0]));
 		}
@@ -972,7 +983,7 @@ static void receive(struct xsk_socket_info *xsk)
 			process_packet(pkt,len,addr);
 		}
 
-		if(DEBUG_ADDRESS){
+		if(opt_debug_addr && addr_count < MAX_ADDRESS_COUNT-1){
 			addr_array[addr_count].number = i;
 			addr_array[addr_count].addr = addr;
 			addr_array[addr_count].len = len;
@@ -1207,9 +1218,10 @@ int main(int argc, char **argv)
         mkdir("./logs", 0777);
     }
 
-	if(DEBUG_ADDRESS)
+	if(opt_debug_addr)
 	{
-		FILE *file = fopen("./logs/addresses_info.txt", "w");
+		snprintf(addr_file_path, sizeof(addr_file_path), "./logs/%s", addr_file);
+		FILE *file = fopen(addr_file_path, "w");
 		if (file == NULL) {
 			perror("Error opening file");
 		}
