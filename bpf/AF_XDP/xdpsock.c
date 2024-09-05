@@ -71,7 +71,6 @@
 
 // DEBUG VARIABLES
 #define DEBUG_LATENCY 0
-#define DEBUG_ADDRESS 0 
 
 
 #define NSEC_PER_SEC		1000000000UL
@@ -518,6 +517,7 @@ static void xdpsock_cleanup(void)
 
 static void inline process_packet(void *data, size_t length, u64 addr)
 {
+	if(!(opt_access_packet || opt_read_packet)){
 	// swap mac addresses
 	struct ether_header *eth = (struct ether_header *)data;
 	struct ether_addr *src_addr = (struct ether_addr *)&eth->ether_shost;
@@ -527,6 +527,7 @@ static void inline process_packet(void *data, size_t length, u64 addr)
 	tmp = *src_addr;
 	*src_addr = *dst_addr;
 	*dst_addr = tmp;
+	}
 
 
 	// check for out of order packets
