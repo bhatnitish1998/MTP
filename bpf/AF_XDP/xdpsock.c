@@ -184,6 +184,8 @@ char addr_file_path[256];
 
 static bool opt_spf = false;
 
+static int spf_distance = 8;
+
 /////////////////////////////////////////////////////
 struct xsk_ring_stats {
 	unsigned long rx_frags;
@@ -874,6 +876,7 @@ static void parse_command_line(int argc, char **argv)
 			break;
 		case 'a':
 			opt_access_packet = 1;
+			spf_distance = 1;
 			break;
 		case 'h':
 			opt_mmap_flags = MAP_HUGETLB;
@@ -889,6 +892,7 @@ static void parse_command_line(int argc, char **argv)
 			break;
 		case 'r':
 			opt_read_packet = 1;
+			spf_distance = 2;
 			break;
 		case 'P':
 			opt_spf = 1;
@@ -973,8 +977,9 @@ static void receive(struct xsk_socket_info *xsk)
 		addr = xsk_umem__add_offset_to_addr(addr);
 		char *pkt = xsk_umem__get_data(xsk->umem->buffer, addr);
 
+		
 		if(opt_spf){
-			const struct xdp_desc *desc = xsk_ring_cons__rx_desc(&xsk->rx, (idx_rx+1));
+			const struct xdp_desc *desc = xsk_ring_cons__rx_desc(&xsk->rx, (idx_rx+spf_distance));
 			u64 addr = desc->addr;
 			char *pkt = xsk_umem__get_data(xsk->umem->buffer, addr);
 			prefetch_packet(pkt);
