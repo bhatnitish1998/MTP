@@ -160,6 +160,8 @@ static int dummy_count;
 
 static bool opt_take_time = false;
 static int dummy_primes = 0;
+
+static int pkt_count=0;
 /////////////// Warm buffers & addresses  ////////////
 static bool opt_warm_buffers = false;
 
@@ -169,7 +171,7 @@ struct addr_info{
 	u32 len;
 };
 
-static int batches_not_changed =-1;
+static int to_add =-1;
 u64 prev_consumer =0;
 
 #define MAX_ADDRESS_COUNT 32769
@@ -517,6 +519,9 @@ static void xdpsock_cleanup(void)
 
 static void inline process_packet(void *data, size_t length, u64 addr)
 {
+	
+	pkt_count++;
+
 	if(!(opt_access_packet || opt_read_packet)){
 	// swap mac addresses
 	struct ether_header *eth = (struct ether_header *)data;
@@ -591,8 +596,12 @@ static void inline process_packet(void *data, size_t length, u64 addr)
 		}
 
 	}
-	if(opt_take_time)
-		dummy_primes+=get_prime_count(40);
+	if(opt_take_time && pkt_count > 10000){
+		if(pkt_count == 10024){
+			pkt_count =0;
+		}
+		dummy_primes+=get_prime_count(100);
+	}
 }
 
 
@@ -955,10 +964,8 @@ static void receive(struct xsk_socket_info *xsk)
 
 	// check if consumer has changed
 	u64 current_cons = *xsk->umem->fq.consumer;
-	if(current_cons == prev_consumer)
-		batches_not_changed++;
-	else
-		batches_not_changed =0;
+	if(current_cons != prev_consumer)
+		to_add =0;
 
 	prev_consumer = current_cons;
 
@@ -999,10 +1006,11 @@ static void receive(struct xsk_socket_info *xsk)
 		}
 
 		if(opt_warm_buffers)
-			custom_xsk_ring_prod__fill_addr(&xsk->umem->fq, idx_fq++,orig,(batches_not_changed*opt_batch_size + i));
+			custom_xsk_ring_prod__fill_addr(&xsk->umem->fq, idx_fq++,orig,(to_add + i));
 		else
 			*xsk_ring_prod__fill_addr(&xsk->umem->fq, idx_fq++) = orig;
 	}
+	to_add+=rcvd;
 
 	// submit the fill queue
 	xsk_ring_prod__submit(&xsk->umem->fq, rcvd);
