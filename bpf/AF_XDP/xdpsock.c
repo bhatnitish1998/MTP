@@ -34,6 +34,9 @@
 #include <unistd.h>
 #include <sched.h>
 #include <math.h>
+#include <sys/ioctl.h>
+#include <linux/sockios.h>
+#include <linux/ethtool.h>
 
 // #include <xdp/xsk.h>
 #include "../lib/xdp-tools/headers/xdp/xsk.h"
@@ -186,7 +189,31 @@ char addr_file_path[256];
 
 static bool opt_spf = false;
 
-/////////////////////////////////////////////////////
+/////////////// Dynamic ring ///////////////
+
+static bool opt_dynamic_ring = false;
+
+struct sigevent sev_monitor;
+timer_t timerid_monitor;
+struct itimerspec  its_monitor;
+
+
+int monitor_interval = 5; // in seconds
+
+u64 prev_producer;
+long long prev_drop;
+long long prev_rcvd;
+
+const char *interface = "ens19f0np0";
+int curr_ring_size;
+int max_ring_size = 8192;
+int min_ring_size = 256;
+
+int ring_sockfd;
+struct ifreq ifr;
+struct ethtool_ringparam ringparam;
+/////////////////////////////////////
+
 struct xsk_ring_stats {
 	unsigned long rx_frags;
 	unsigned long rx_npkts;
@@ -382,9 +409,138 @@ static void inline prefetch_packet(void* addr)
 	}
 }
 
+////////////////// Dynamic ring size ////////////////////////////////////
+
+static inline double get_loss_percent()
+{
+	FILE *fp;
+	char line[512];
+	char iface[64];
+
+	long long rcvd_pkts = 0;
+	long long dropped_pkts = 0;
+
+	// Open /proc/net/dev
+	fp = fopen("/proc/net/dev", "r");
+	if (fp == NULL)
+	{
+		perror("Failed to open /proc/net/dev");
+		return -1;
+	}
+
+	// Skip the first two header lines
+	if(fgets(line, sizeof(line), fp)==NULL)
+		perror("Could not read proc file");
+	if(fgets(line, sizeof(line), fp)==NULL)
+		perror("Could not read proc file");
+
+	// Read each line and check for the desired interface
+	while (fgets(line, sizeof(line), fp) != NULL)
+	{
+		sscanf(line, "%63[^:]", iface); // Extract the interface name
+		if (strcmp(iface, interface) == 0)
+		{
+			// Tokenize the string
+			char *token = strtok(line, " ");
+			int column = 1;
+
+			// Get column 3 and 5
+			while (token != NULL)
+			{
+				if (column == 3)
+					rcvd_pkts = strtoll(token, NULL, 10);
+
+				if (column == 5)
+				{
+					dropped_pkts = strtoll(token, NULL, 10);
+					break;
+				}
+				column++;
+				token = strtok(NULL, " ");
+			}
+			break;
+		}
+	}
+	long long dropped = dropped_pkts - prev_drop;
+	long long received = rcvd_pkts - prev_rcvd;
+	double loss =0;
+	if(received !=0)
+		loss = (double)dropped/(dropped+received);
+
+	prev_drop=dropped_pkts;
+	prev_rcvd = rcvd_pkts;
+	return loss*100;
+}
+
+//TODO: Same socket
+static inline void init_ring_socket()
+{
+	// Create a socket to perform ioctl operations
+    ring_sockfd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (ring_sockfd < 0) {
+        perror("socket");
+    }
+
+    // Clear the ifreq structure and set the interface name
+    memset(&ifr, 0, sizeof(ifr));
+    strncpy(ifr.ifr_name, interface, sizeof(ifr.ifr_name) - 1);
+
+	// Prepare the ethtool structure
+    memset(&ringparam, 0, sizeof(ringparam));
+
+    // Attach the ethtool structure to ifr structure
+    ifr.ifr_data = (caddr_t)&ringparam;
+
+}
+static inline void set_ring_size(int size)
+{
+    ringparam.rx_pending = size;
+
+    // Perform the ioctl call to set the new ring parameters
+    if (ioctl(ring_sockfd, SIOCETHTOOL, &ifr) < 0) {
+        perror("ioctl set");
+        close(ring_sockfd);
+    }
+}
+
+static inline void create_timer()
+{
+	// Create timer
+	sev_monitor.sigev_notify = SIGEV_SIGNAL;
+	sev_monitor.sigev_signo = SIGALRM;
+	sev_monitor.sigev_value.sival_ptr = &timerid_monitor;
+	if (timer_create(CLOCK_REALTIME, &sev_monitor, &timerid_monitor) == -1)
+		perror("timer create");
+}
+
+static inline void start_timer()
+{
+	// start timer with interval of 1 sec
+	its_monitor.it_value.tv_sec = monitor_interval;
+	its_monitor.it_value.tv_nsec = 0;
+	its_monitor.it_interval.tv_sec = monitor_interval;
+	its_monitor.it_interval.tv_nsec = 0;
+	if (timer_settime(timerid_monitor, 0, &its_monitor, NULL) == -1)
+		perror("timer_settime");
+}
+
+static void timer_handler(int sig)
+{
+	double loss_percent = get_loss_percent();
+	
+	if(loss_percent < 0.01)
+	{
+		int to_change = curr_ring_size*2 < max_ring_size? curr_ring_size*2:max_ring_size;
+		set_ring_size(to_change);
+	}
+	else
+	{
+		int to_change = curr_ring_size/2 > min_ring_size? curr_ring_size: min_ring_size;
+		set_ring_size(to_change);
+	}
+}
+
 //////////////////////////////////////////////////////
-
-
 static int get_clockid(clockid_t *id, const char *name)
 {
 	const struct clockid_map *clk;
@@ -446,7 +602,6 @@ static void  debug_addresses()
 		fclose(file);
 }
 
-
 void post_exp_process()
 {
 	FILE *file = fopen("./logs/stats.csv", "w");
@@ -473,6 +628,10 @@ void post_exp_process()
 
 	if(opt_debug_addr)
 		debug_addresses();
+
+	if(opt_dynamic_ring)
+		close(ring_sockfd);
+		
 
 }
 
@@ -747,6 +906,7 @@ static struct option long_options[] = {
 	{"soft-pf", no_argument, 0, 'P'},
 	{"take-time", no_argument, 0, 't'},
 	{"debug-addr", required_argument, 0, 'D'},
+	{"dynamic-ring", no_argument, 0, 'R'},
 	{0, 0, 0, 0}
 };
 
@@ -785,6 +945,7 @@ static void usage(const char *prog)
 		"  -P, --soft-pf   Software prefetch next buffers \n"
 		"  -t, --take-time   Add packet processing time. \n"
 		"  -D, --debug-addr=file	Write addresses to file \n"
+		"  -R, --dynamic-ring	Dynamically change ring size \n"
 		"\n";
 	fprintf(stderr, str, prog, opt_xsk_frame_size,
 		opt_batch_size, MIN_PKT_SIZE, MIN_PKT_SIZE,
@@ -802,7 +963,7 @@ static void parse_command_line(int argc, char **argv)
 
 	for (;;) {
 		c = getopt_long(argc, argv,
-				"i:q:pSNn:w:O:czf:muMd:b:BLU:ahWs:CrPtD:",
+				"i:q:pSNn:w:O:czf:muMd:b:BLU:ahWs:CrPtD:R",
 				long_options, &option_index);
 		if (c == -1)
 			break;
@@ -880,6 +1041,7 @@ static void parse_command_line(int argc, char **argv)
 			rx_queue_size = umem_size/2;
 			tx_queue_size = umem_size/2;
 			num_fq_desc = umem_size;
+			prev_producer = fq_size;
 			break;
 		case 'a':
 			opt_access_packet = 1;
@@ -908,6 +1070,9 @@ static void parse_command_line(int argc, char **argv)
 		case 'D':
 			opt_debug_addr =1;
 			addr_file = optarg;
+			break;
+		case 'R':
+			opt_dynamic_ring =1;
 			break;
 		default:
 			usage(basename(argv[0]));
@@ -1267,6 +1432,16 @@ int main(int argc, char **argv)
 	signal(SIGINT, int_exit);
 	signal(SIGTERM, int_exit);
 	signal(SIGABRT, int_exit);
+
+	if(opt_dynamic_ring){
+
+		// ring socket
+		init_ring_socket();
+		// timer 
+		signal(SIGALRM, timer_handler);
+		create_timer();
+		start_timer();
+	}
 
 	setlocale(LC_ALL, "");
 
