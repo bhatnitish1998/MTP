@@ -198,20 +198,16 @@ timer_t timerid_monitor;
 struct itimerspec  its_monitor;
 
 
-int monitor_interval = 5; // in seconds
+int monitor_secs = 0;
+int monitor_nsecs =100000;
 
-u64 prev_producer;
+u32 prev_producer;
 long long prev_drop;
 long long prev_rcvd;
+long long prev_diff;
 
 const char *interface = "ens19f0np0";
-int curr_ring_size;
-int max_ring_size = 8192;
-int min_ring_size = 256;
 
-int ring_sockfd;
-struct ifreq ifr;
-struct ethtool_ringparam ringparam;
 /////////////////////////////////////
 
 struct xsk_ring_stats {
@@ -411,7 +407,8 @@ static void inline prefetch_packet(void* addr)
 
 ////////////////// Dynamic ring size ////////////////////////////////////
 
-static inline double get_loss_percent()
+// fills in received and dropped packets in passed array.
+static inline void get_pkt_stats_since_last(long long arr[2])
 {
 	FILE *fp;
 	char line[512];
@@ -423,10 +420,7 @@ static inline double get_loss_percent()
 	// Open /proc/net/dev
 	fp = fopen("/proc/net/dev", "r");
 	if (fp == NULL)
-	{
 		perror("Failed to open /proc/net/dev");
-		return -1;
-	}
 
 	// Skip the first two header lines
 	if(fgets(line, sizeof(line), fp)==NULL)
@@ -461,46 +455,30 @@ static inline double get_loss_percent()
 			break;
 		}
 	}
+
 	long long dropped = dropped_pkts - prev_drop;
 	long long received = rcvd_pkts - prev_rcvd;
-	double loss =0;
-	if(received !=0)
-		loss = (double)dropped/(dropped+received);
-
+	arr[0] = received;
+	arr[1] = dropped;
 	prev_drop=dropped_pkts;
 	prev_rcvd = rcvd_pkts;
-	return loss*100;
+	fclose(fp);
 }
 
-//TODO: Same socket
-static inline void init_ring_socket()
+static inline long long get_warm_buffers_since_last()
 {
-	// Create a socket to perform ioctl operations
-    ring_sockfd = socket(AF_INET, SOCK_DGRAM, 0);
-    if (ring_sockfd < 0) {
-        perror("socket");
-    }
-
-    // Clear the ifreq structure and set the interface name
-    memset(&ifr, 0, sizeof(ifr));
-    strncpy(ifr.ifr_name, interface, sizeof(ifr.ifr_name) - 1);
-
-	// Prepare the ethtool structure
-    memset(&ringparam, 0, sizeof(ringparam));
-
-    // Attach the ethtool structure to ifr structure
-    ifr.ifr_data = (caddr_t)&ringparam;
-
-}
-static inline void set_ring_size(int size)
-{
-    ringparam.rx_pending = size;
-
-    // Perform the ioctl call to set the new ring parameters
-    if (ioctl(ring_sockfd, SIOCETHTOOL, &ifr) < 0) {
-        perror("ioctl set");
-        close(ring_sockfd);
-    }
+	long long diff =0;
+	struct xsk_socket_info *xsk = xsks[0];
+	u32 current_producer = *xsk->umem->fq.producer;
+	if(current_producer >= prev_producer)
+		diff = current_producer - prev_producer;
+	else
+		diff = prev_diff;
+	
+	prev_diff = diff;
+	prev_producer = current_producer;
+	return diff;
+	
 }
 
 static inline void create_timer()
@@ -516,28 +494,20 @@ static inline void create_timer()
 static inline void start_timer()
 {
 	// start timer with interval of 1 sec
-	its_monitor.it_value.tv_sec = monitor_interval;
-	its_monitor.it_value.tv_nsec = 0;
-	its_monitor.it_interval.tv_sec = monitor_interval;
-	its_monitor.it_interval.tv_nsec = 0;
+	its_monitor.it_value.tv_sec = monitor_secs;
+	its_monitor.it_value.tv_nsec = monitor_nsecs;
+	its_monitor.it_interval.tv_sec = monitor_secs;
+	its_monitor.it_interval.tv_nsec = monitor_nsecs;
 	if (timer_settime(timerid_monitor, 0, &its_monitor, NULL) == -1)
 		perror("timer_settime");
 }
 
 static void timer_handler(int sig)
 {
-	double loss_percent = get_loss_percent();
-	
-	if(loss_percent < 0.01)
-	{
-		int to_change = curr_ring_size*2 < max_ring_size? curr_ring_size*2:max_ring_size;
-		set_ring_size(to_change);
-	}
-	else
-	{
-		int to_change = curr_ring_size/2 > min_ring_size? curr_ring_size: min_ring_size;
-		set_ring_size(to_change);
-	}
+	long long stats[2];
+	get_pkt_stats_since_last(stats);
+	long long warm_buffers = get_warm_buffers_since_last();
+	printf("Received:%lld Dropped:%lld Warm:%lld\n",stats[0],stats[1],warm_buffers);
 }
 
 //////////////////////////////////////////////////////
@@ -628,10 +598,7 @@ void post_exp_process()
 
 	if(opt_debug_addr)
 		debug_addresses();
-
-	if(opt_dynamic_ring)
-		close(ring_sockfd);
-		
+	
 
 }
 
@@ -646,6 +613,7 @@ static void remove_xdp_program(void)
 
 static void int_exit(int sig)
 {
+	timer_delete(timerid_monitor);
 	benchmark_done = true;
 }
 
@@ -1435,8 +1403,6 @@ int main(int argc, char **argv)
 
 	if(opt_dynamic_ring){
 
-		// ring socket
-		init_ring_socket();
 		// timer 
 		signal(SIGALRM, timer_handler);
 		create_timer();
