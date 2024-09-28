@@ -925,6 +925,162 @@ static void parse_command_line(int argc, char **argv)
 
 }
 
+static void kick_tx(struct xsk_socket_info *xsk)
+{
+	int ret;
+	ret = sendto(xsk_socket__fd(xsk->xsk), NULL, 0, MSG_DONTWAIT, NULL, 0);
+
+	if (ret >= 0 || errno == ENOBUFS || errno == EAGAIN ||
+	    errno == EBUSY || errno == ENETDOWN)
+		return;
+	exit_with_error(errno);
+}
+
+static inline void complete_tx_forward(struct xsk_socket_info *xsk)
+{
+	struct xsk_umem_info *umem = xsk->umem;
+	u32 idx_cq = 0, idx_fq = 0;
+	unsigned int rcvd;
+	size_t ndescs;
+
+	if (!xsk->outstanding_tx)
+		return;
+
+	/* In copy mode, Tx is driven by a syscall so we need to use e.g. sendto() to
+	 * really send the packets. In zero-copy mode we do not have to do this, since Tx
+	 * is driven by the NAPI loop. So as an optimization, we do not have to call
+	 * sendto() all the time in zero-copy mode for l2fwd.
+	 */
+	if (opt_xdp_bind_flags & XDP_COPY) {
+		xsk->app_stats.copy_tx_sendtos++;
+		kick_tx(xsk);
+	}
+
+	ndescs = (xsk->outstanding_tx > opt_batch_size) ? opt_batch_size :
+		xsk->outstanding_tx;
+
+	/* re-add completed Tx buffers */
+	rcvd = xsk_ring_cons__peek(&umem->cq, ndescs, &idx_cq);
+	if (rcvd > 0) {
+		unsigned int i;
+		int ret;
+
+		ret = xsk_ring_prod__reserve(&umem->fq, rcvd, &idx_fq);
+		while (ret != rcvd) {
+			if (ret < 0)
+				exit_with_error(-ret);
+			if (opt_busy_poll || xsk_ring_prod__needs_wakeup(&umem->fq)) {
+				xsk->app_stats.fill_fail_polls++;
+				recvfrom(xsk_socket__fd(xsk->xsk), NULL, 0, MSG_DONTWAIT, NULL,
+					 NULL);
+			}
+			ret = xsk_ring_prod__reserve(&umem->fq, rcvd, &idx_fq);
+		}
+
+		// check if consumer has changed
+		u64 current_cons = *xsk->umem->fq.consumer;
+		if(current_cons != prev_consumer)
+			to_add =0;
+
+		prev_consumer = current_cons;
+
+		for (i = 0; i < rcvd; i++)
+		{
+			u64 orig = *xsk_ring_cons__comp_addr(&umem->cq, idx_cq++);
+
+			if(opt_warm_buffers)
+				custom_xsk_ring_prod__fill_addr(&umem->fq,idx_fq++,orig,(to_add+i));
+			else
+				*xsk_ring_prod__fill_addr(&umem->fq, idx_fq++) = orig;
+		}
+		to_add+=rcvd;
+
+		xsk_ring_prod__submit(&xsk->umem->fq, rcvd);
+		xsk_ring_cons__release(&xsk->umem->cq, rcvd);
+		xsk->outstanding_tx -= rcvd;
+	}
+}
+
+
+static void forward(struct xsk_socket_info *xsk)
+{
+	u32 idx_rx = 0, idx_tx = 0, frags_done = 0;
+	unsigned int rcvd, i, eop_cnt = 0;
+	static u32 nb_frags;
+	int ret;
+
+	complete_tx_forward(xsk);
+
+	// check if batch ready to receive
+	rcvd = xsk_ring_cons__peek(&xsk->rx, opt_batch_size, &idx_rx);
+	if (!rcvd) {
+		if (opt_busy_poll || xsk_ring_prod__needs_wakeup(&xsk->umem->fq)) {
+			xsk->app_stats.rx_empty_polls++;
+			recvfrom(xsk_socket__fd(xsk->xsk), NULL, 0, MSG_DONTWAIT, NULL, NULL);
+		}
+		return;
+	}
+
+	// reserve the tx ring to put back the addresses
+	ret = xsk_ring_prod__reserve(&xsk->tx, rcvd, &idx_tx);
+	while (ret != rcvd) {
+		if (ret < 0)
+			exit_with_error(-ret);
+		complete_tx_forward(xsk);
+		if (opt_busy_poll || xsk_ring_prod__needs_wakeup(&xsk->tx)) {
+			xsk->app_stats.tx_wakeup_sendtos++;
+			kick_tx(xsk);
+		}
+		ret = xsk_ring_prod__reserve(&xsk->tx, rcvd, &idx_tx);
+	}
+
+	// process each packets and put back the addresses of buffers
+	for (i = 0; i < rcvd; i++) {
+		const struct xdp_desc *desc = xsk_ring_cons__rx_desc(&xsk->rx, idx_rx++);
+		bool eop = IS_EOP_DESC(desc->options);
+		u64 addr = desc->addr;
+		u32 len = desc->len;
+		u64 orig = xsk_umem__extract_addr(addr);
+
+		addr = xsk_umem__add_offset_to_addr(addr);
+		char *pkt = xsk_umem__get_data(xsk->umem->buffer, addr);
+
+		if (!nb_frags++){
+			process_packet(pkt,len,addr);
+		}
+
+		struct xdp_desc *tx_desc = xsk_ring_prod__tx_desc(&xsk->tx, idx_tx++);
+
+		tx_desc->options = eop ? 0 : XDP_PKT_CONTD;
+		tx_desc->addr = orig;
+		tx_desc->len = len;
+
+		if(opt_debug_addr && addr_count < MAX_ADDRESS_COUNT-1){
+			addr_array[addr_count].number = i;
+			addr_array[addr_count].addr = addr;
+			addr_array[addr_count].len = len;
+			addr_count++;
+		}
+
+		if (eop) {
+			frags_done += nb_frags;
+			nb_frags = 0;
+			eop_cnt++;
+		}
+	}
+
+	// submit to the tx ring
+	xsk_ring_prod__submit(&xsk->tx, frags_done);
+	// release the rx buffers
+	xsk_ring_cons__release(&xsk->rx, frags_done);
+
+	xsk->ring_stats.rx_npkts += eop_cnt;
+	xsk->ring_stats.tx_npkts += eop_cnt;
+	xsk->ring_stats.rx_frags += rcvd;
+	xsk->ring_stats.tx_frags += rcvd;
+	xsk->outstanding_tx += frags_done;
+}
+
 static void receive(struct xsk_socket_info *xsk)
 {
 	u32 idx_rx = 0, idx_fq = 0, frags_done = 0;
@@ -1021,7 +1177,7 @@ static void receive_all(void)
 
 	for (i = 0; i < num_socks; i++) {
 		fds[i].fd = xsk_socket__fd(xsks[i]->xsk);
-		fds[i].events = POLLIN;
+		fds[i].events = POLLIN | POLLOUT; 
 	}
 
 	for (;;) {
@@ -1034,8 +1190,12 @@ static void receive_all(void)
 				continue;
 		}
 
-		for (i = 0; i < num_socks; i++)
-			receive(xsks[i]);
+		for (i = 0; i < num_socks; i++){
+			if(opt_application_type == 5)
+				forward(xsks[i]);
+			else
+				receive(xsks[i]);
+		}
 
 		if (benchmark_done)
 			break;
@@ -1243,6 +1403,9 @@ int main(int argc, char **argv)
 	umem = xsk_configure_umem(bufs, umem_size * opt_xsk_frame_size);
 
 	rx = true;
+	if(opt_application_type == 5)
+		tx = true;
+
 	xsk_populate_fill_ring(umem);
 	for (i = 0; i < opt_num_xsks; i++)
 		xsks[num_socks++] = xsk_configure_socket(umem, rx, tx);
