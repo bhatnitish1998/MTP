@@ -1,6 +1,16 @@
 // SPDX-License-Identifier: GPL-2.0
 /* Copyright(c) 2017 - 2022 Intel Corporation. */
 
+/*
+Application types
+0 = MAC swap and drop 
+1 = Read every cache line
+2 = Write every cache line
+3 = Huge calculation (Compute prime numbers)
+4 = Some packets take more time (say every 10000 thpacket)
+5 = MAC swap and forward
+*/
+
 #include <errno.h>
 #include <getopt.h>
 #include <libgen.h>
@@ -110,6 +120,9 @@ static int opt_schprio = SCHED_PRI__DEFAULT;
 static struct xdp_program *xdp_prog;
 static bool load_xdp_prog;
 
+////////////// Application type variables ////////////////
+int opt_application_type = 0;
+
 ///////////// Configuration variables ////////////////
 
 // queue sizes: Changing umem sizes changes their size accordingly -U
@@ -137,12 +150,8 @@ static bool opt_complete_umem;
 static u64 prev_addr = 0;
 static u64 out_of_order = 0;
 
-static bool opt_access_packet = false;
-static bool opt_read_packet = false;
-
 static int dummy_count;
 
-static bool opt_take_time = false;
 static int dummy_primes = 0;
 
 static int pkt_count=0;
@@ -297,10 +306,10 @@ static void inline prefetch_packet(void* addr)
 	char *pkt = (char*)addr;
 	__builtin_prefetch(&pkt[0],1,3);
 
-	if(opt_access_packet || opt_read_packet){
+	if(opt_application_type == 2 || opt_application_type == 1){
 		for(int i =1; i< opt_packet_size; i+=64)
 		{	
-			if(opt_access_packet)
+			if(opt_application_type==2)
 			__builtin_prefetch(&pkt[i],1,3);
 			else
 			__builtin_prefetch(&pkt[i],0,3);
@@ -549,7 +558,7 @@ static void inline process_packet(void *data, size_t length, u64 addr)
 	
 	pkt_count++;
 
-	if(!(opt_access_packet || opt_read_packet)){
+	if(!(opt_application_type==2|| opt_application_type == 1)){
 	// swap mac addresses
 	struct ether_header *eth = (struct ether_header *)data;
 	struct ether_addr *src_addr = (struct ether_addr *)&eth->ether_shost;
@@ -568,13 +577,13 @@ static void inline process_packet(void *data, size_t length, u64 addr)
 	prev_addr = addr;
 
 
-	if(opt_access_packet)
+	if(opt_application_type == 2)
 	{
 		unsigned char *pkt = (unsigned char *)data;
 		for(int i =0; i< length; i+=64)
 			pkt[i] = 'x';
 	}
-	if(opt_read_packet)
+	if(opt_application_type == 1)
 	{
 		unsigned char *pkt = (unsigned char *)data;
 		for(int i =0; i<length;i+=64)
@@ -584,11 +593,17 @@ static void inline process_packet(void *data, size_t length, u64 addr)
 		}
 
 	}
-	if(opt_take_time && pkt_count > 10000){
-		if(pkt_count == 10024){
-			pkt_count =0;
-		}
+	if(opt_application_type == 3 ){
 		dummy_primes+=get_prime_count(100);
+	}
+
+	if (opt_application_type == 4)
+	{
+		if(pkt_count >10000)
+		{
+			pkt_count = 0;
+			dummy_primes+=get_prime_count(20);
+		}
 	}
 }
 
@@ -713,16 +728,14 @@ static struct option long_options[] = {
 	{"batch-size", required_argument, 0, 'b'},	
 	{"busy-poll", no_argument, 0, 'B'},
 	{"UMEM-size", required_argument, 0, 'U'},
-	{"access-packet", no_argument, 0, 'a'},
 	{"huge-pages", no_argument, 0, 'h'},
 	{"Warm-buffers", no_argument, 0, 'W'},
 	{"packet-size", required_argument, 0, 's'},
 	{"Complete-umem", no_argument, 0, 'C'},
-	{"read-packet", no_argument, 0, 'r'},
 	{"soft-pf", no_argument, 0, 'P'},
-	{"take-time", no_argument, 0, 't'},
 	{"debug-addr", required_argument, 0, 'D'},
 	{"dynamic-ring", no_argument, 0, 'R'},
+	{"app-type", required_argument, 0, 'A'},
 	{0, 0, 0, 0}
 };
 
@@ -751,16 +764,14 @@ static void usage(const char *prog)
 		"			packets. Default: %d\n"
 		"  -B, --busy-poll      Busy poll.\n"
 		"  -U, --UMEM-size=n      Set UMEM size.\n"
-		"  -a, --access-packet      Write every cacheline of packet data.\n"
 		"  -h, --huge-pages      Use huge pages for umem.\n"
 		"  -W, --Warm-buffers      Use recently read buffers first.\n"
 		"  -s, --packet-size=n   Specify the incoming packet size for better unaligned mode.\n"
 		"  -C, --Complete-umem   Use entire umem in unaligned mode. Extend fill queue as needed\n"
-		"  -r, --read-packet   read every cache line \n"
 		"  -P, --soft-pf   Software prefetch next buffers \n"
-		"  -t, --take-time   Add packet processing time. \n"
 		"  -D, --debug-addr=file	Write addresses to file \n"
 		"  -R, --dynamic-ring	Dynamically change ring size \n"
+		"  -A, --app-type=type	Application type(0,1,2,3,4,5) \n"
 		"\n";
 	fprintf(stderr, str, prog, opt_xsk_frame_size,
 		opt_batch_size,SCHED_PRI__DEFAULT);
@@ -776,7 +787,7 @@ static void parse_command_line(int argc, char **argv)
 
 	for (;;) {
 		c = getopt_long(argc, argv,
-				"i:q:pSNn:w:O:czf:muMd:b:BU:ahWs:CrPtD:R",
+				"i:q:pSNn:w:O:czf:muMd:b:BU:hWs:CPD:RA:",
 				long_options, &option_index);
 		if (c == -1)
 			break;
@@ -853,9 +864,6 @@ static void parse_command_line(int argc, char **argv)
 			num_fq_desc = umem_size;
 			prev_producer = fq_size;
 			break;
-		case 'a':
-			opt_access_packet = 1;
-			break;
 		case 'h':
 			opt_mmap_flags = MAP_HUGETLB;
 			break;
@@ -868,14 +876,8 @@ static void parse_command_line(int argc, char **argv)
 		case 'C':
 			opt_complete_umem = 1;
 			break;
-		case 'r':
-			opt_read_packet = 1;
-			break;
 		case 'P':
 			opt_spf = 1;
-			break;
-		case 't':
-			opt_take_time = 1;
 			break;
 		case 'D':
 			opt_debug_addr =1;
@@ -883,6 +885,22 @@ static void parse_command_line(int argc, char **argv)
 			break;
 		case 'R':
 			opt_dynamic_ring =1;
+			break;
+		case 'A':
+			opt_application_type = atoi(optarg);
+			if(opt_application_type == 0)
+				printf("MAC swap and drop\n");
+			else if(opt_application_type == 1)
+				printf("Read every cache line\n");
+			else if(opt_application_type == 2)
+				printf("Write every cache line\n");
+			else if(opt_application_type == 3)
+				printf("Huge computation\n");
+			else if(opt_application_type == 4)
+				printf("Some packets take time\n");
+			else if(opt_application_type == 5)
+				printf("MAC swap and forward\n");
+
 			break;
 		default:
 			usage(basename(argv[0]));
