@@ -37,15 +37,13 @@
 #include <sys/ioctl.h>
 #include <linux/sockios.h>
 #include <linux/ethtool.h>
-
-// #include <xdp/xsk.h>
-#include "../lib/xdp-tools/headers/xdp/xsk.h"
 #include <xdp/libxdp.h>
-
 #include <bpf/libbpf.h>
 #include <bpf/bpf.h>
 #include "xdpsock.h"
 #include <sys/stat.h>
+
+#include "../lib/xdp-tools/headers/xdp/xsk.h"
 
 #ifndef SOL_XDP
 #define SOL_XDP 283
@@ -70,10 +68,6 @@
 #define MIN_PKT_SIZE 64
 #define MAX_PKT_SIZE 9728 /* Max frame size supported by many NICs */
 #define IS_EOP_DESC(options) (!((options) & XDP_PKT_CONTD))
-
-
-// DEBUG VARIABLES
-#define DEBUG_LATENCY 0
 
 
 #define NSEC_PER_SEC		1000000000UL
@@ -137,19 +131,6 @@ static int multiplier = 4096;
 static int opt_packet_size = 512;
 
 static bool opt_complete_umem;
-
-///////////// Latency related variables //////////////
-static bool opt_measure_latency;
-
-static int latency_count =0;
-#define MAX_LATENCY_COUNT 10000000
-u64 latency_array[MAX_LATENCY_COUNT];
-
-u64 min_latency =0;
-u64 max_latency =1e15;
-double average_latency=0.0;
-double tail_latency_99=0.0; // 99th percentile;
-double tail_latency_999=0.0; // 99.9th percentile
 
 ////////////// Packet related variables //////////////
 
@@ -309,85 +290,7 @@ static int inline get_prime_count(long long limit){
 	return counts;
 }
 
-///////////// Latency related functions //////////////
-void merge(u64 arr[], int low, int mid, int high)
-{
-	u64 temp[high - low +1];
-    int i =low;
-    int j = mid+1;
-    int k=0;
-
-    while(i<=mid && j<=high)
-    {
-        if (arr[i]<=arr[j])
-            temp[k++]= arr[i++];
-        else
-            temp[k++]= arr[j++];
-    }
-
-    while(i<=mid){
-        temp[k++]= arr[i++];
-	}
-
-    while(j<=high){
-        temp[k++]= arr[j++];
-	}
-
-	k=0;
-    for(i=low;i<=high;i++,k++)
-        arr[i] = temp[k];
-}
-
-void merge_sort(u64 v[], int low, int high)
-{
-    if(low >= high) return;
-
-    int mid = (low+high)/2;
-    merge_sort(v,low,mid);
-    merge_sort(v,mid+1,high);
-
-    merge(v,low,mid,high);
-}
-
-void compute_latencies()
-{
-
-	if(DEBUG_LATENCY)
-	{
-		FILE *file = fopen("./logs/latency_debug_info.txt", "w");
-		if (file == NULL) {
-			perror("Error opening file");
-		}
-
-		for(int i =0; i< latency_count; i++)
-		fprintf(file, "%lld\t",latency_array[i]);
-		
-		fclose(file);
-	}
-	merge_sort(latency_array,0,latency_count-1);
-	
-	// min
-	min_latency = latency_array[0];
-	// max
-	max_latency = latency_array[latency_count-1];
-	// average
-	for(int i =0; i< latency_count; i++)
-		average_latency += (double)latency_array[i] / latency_count;
-	// tail 99th percentile
-	for(int i =latency_count - (latency_count/100); i< latency_count; i++)
-		tail_latency_99 += (double)latency_array[i] / (latency_count/100);
-	// tail 99.9th percentile
-		for(int i =latency_count - (latency_count/1000); i< latency_count; i++)
-		tail_latency_999 += (double)latency_array[i] / (latency_count/1000);
-	
-	// Write it to file
-	FILE *file = fopen("./logs/latency_data.txt", "w");
-    if (file == NULL) {
-        perror("Error opening file");
-    }
-    fprintf(file, "%d,%lld,%lld,%.2f,%.2f,%.2f\n",latency_count, min_latency, max_latency, average_latency, tail_latency_99, tail_latency_999);
-    fclose(file);
-}
+////////////////////////////////////////////////////////
 
 static void inline prefetch_packet(void* addr)
 {
@@ -593,9 +496,6 @@ void post_exp_process()
 	}
 	fclose(file);
 
-	if(opt_measure_latency)
-		compute_latencies();
-
 	if(opt_debug_addr)
 		debug_addresses();
 	
@@ -667,45 +567,6 @@ static void inline process_packet(void *data, size_t length, u64 addr)
 		out_of_order++;
 	prev_addr = addr;
 
-	// Store latencies in array
-	if(opt_measure_latency)
-	{
-		void *payload = data + sizeof(struct ethhdr) + sizeof(struct iphdr) + sizeof(struct udphdr);
-		u64 *start = (u64*) payload;
-		u64 packet_sec = *start;
-		u64 packet_nsec = *(start +1);
-
-		// If no timestamp on packet return
-		if(packet_sec ==0 && packet_nsec ==0)
-			return;
-
-		else{
-
-			// compute delay
-			struct timespec ts;
-			clock_gettime(CLOCK_REALTIME, &ts);
-
-			u64 delay_sec = ts.tv_sec - packet_sec;
-			u64 delay_nsec = 0 ;
-
-			if(delay_sec !=0 )
-				delay_nsec +=1e9;
-
-
-			delay_nsec += ts.tv_nsec;
-			delay_nsec -= packet_nsec;
-
-			// store delay in array as microseconds
-			if(latency_count >= MAX_LATENCY_COUNT)
-			{
-				fprintf(stderr, "ERROR: Latency array overflow\n");
-				exit(EXIT_FAILURE);
-			}
-			
-			latency_array[latency_count] = delay_nsec/1000;
-			latency_count++;
-		}
-	}
 
 	if(opt_access_packet)
 	{
@@ -732,19 +593,7 @@ static void inline process_packet(void *data, size_t length, u64 addr)
 }
 
 
-
 #define ETH_FCS_SIZE 4
-
-#define ETH_HDR_SIZE (sizeof(struct ethhdr))
-#define PKT_HDR_SIZE (ETH_HDR_SIZE + sizeof(struct iphdr) + \
-		      sizeof(struct udphdr) )
-
-#define PKT_SIZE		(opt_pkt_size - ETH_FCS_SIZE)
-#define IP_PKT_SIZE		(PKT_SIZE - ETH_HDR_SIZE)
-#define UDP_PKT_SIZE		(IP_PKT_SIZE - sizeof(struct iphdr))
-#define UDP_PKT_DATA_SIZE	(UDP_PKT_SIZE - \
-				 (sizeof(struct udphdr)))
-
 
 static struct xsk_umem_info *xsk_configure_umem(void *buffer, u64 size)
 {
@@ -863,7 +712,6 @@ static struct option long_options[] = {
 	{"clock", required_argument, 0, 'w'},
 	{"batch-size", required_argument, 0, 'b'},	
 	{"busy-poll", no_argument, 0, 'B'},
-	{"measure-latency", no_argument, 0, 'L'},
 	{"UMEM-size", required_argument, 0, 'U'},
 	{"access-packet", no_argument, 0, 'a'},
 	{"huge-pages", no_argument, 0, 'h'},
@@ -902,7 +750,6 @@ static void usage(const char *prog)
 		"  -b, --batch-size=n	Batch size for sending or receiving\n"
 		"			packets. Default: %d\n"
 		"  -B, --busy-poll      Busy poll.\n"
-		"  -L, --measure-latency      Mesure latency.\n"
 		"  -U, --UMEM-size=n      Set UMEM size.\n"
 		"  -a, --access-packet      Write every cacheline of packet data.\n"
 		"  -h, --huge-pages      Use huge pages for umem.\n"
@@ -916,9 +763,7 @@ static void usage(const char *prog)
 		"  -R, --dynamic-ring	Dynamically change ring size \n"
 		"\n";
 	fprintf(stderr, str, prog, opt_xsk_frame_size,
-		opt_batch_size, MIN_PKT_SIZE, MIN_PKT_SIZE,
-		MAX_PKT_SIZE, 
-		SCHED_PRI__DEFAULT);
+		opt_batch_size,SCHED_PRI__DEFAULT);
 
 	exit(EXIT_FAILURE);
 }
@@ -931,7 +776,7 @@ static void parse_command_line(int argc, char **argv)
 
 	for (;;) {
 		c = getopt_long(argc, argv,
-				"i:q:pSNn:w:O:czf:muMd:b:BLU:ahWs:CrPtD:R",
+				"i:q:pSNn:w:O:czf:muMd:b:BU:ahWs:CrPtD:R",
 				long_options, &option_index);
 		if (c == -1)
 			break;
@@ -998,9 +843,6 @@ static void parse_command_line(int argc, char **argv)
 			break;
 		case 'B':
 			opt_busy_poll = 1;
-			break;
-		case 'L':
-			opt_measure_latency = 1;
 			break;
 		case 'U':
 			umem_size = atoi(optarg);
