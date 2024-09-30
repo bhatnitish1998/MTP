@@ -13,6 +13,7 @@ IFNAME = 'ens19f0np0'
 PKTGEN = '/home/magnus/packetgen/Pktgen-DPDK/builddir/app/pktgen'
 PKTGEN_SCRIPT = '/home/magnus/nitish/MTP/pktgen_scripts/gen.lua' 
 PKTGEN_STAT = '/home/magnus/nitish/MTP/pktgen_scripts/pkt_stat.txt'
+LATENCY_STAT = '/home/magnus/nitish/MTP/pktgen_scripts/latency.txt'
 
 APP_NAME = 'xdpsock'
 APP_PATH = f'/home/magnus/nitish/MTP/bpf/AF_XDP/{APP_NAME}'
@@ -145,11 +146,13 @@ def get_rcvd_pkts():
 
 
 def get_latency_data():
-    with open('./logs/latency_data.txt', 'r') as file:
-        data = file.read()
-    values = data.split(',')
-    values = [float(value) if '.' in value else int(value) for value in values]
-    return values
+    cmd = ['scp', f'{TESTER}:{LATENCY_STAT}', '.']
+    proc = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    time.sleep(1)
+    with open("latency.txt", "r") as f:
+        ret = f.read().splitlines()
+    return float(ret[0]),float(ret[1]),float(ret[2])
+
 
 
 def write_row_to_files(row):
@@ -179,10 +182,6 @@ def write_row_to_file(filename, row):
 def run_once(exp_cmd, mode, curr_t, pkt_size, duration, pktgen):
     curr_cmd = exp_cmd.copy()
 
-    if mode == 2:
-        curr_cmd.append('-L')
-    print(curr_cmd)
-
     rx_queue_full = -1
     row = []
 
@@ -199,7 +198,11 @@ def run_once(exp_cmd, mode, curr_t, pkt_size, duration, pktgen):
     pktgen.expect('config-done')
 
     # start pktgen
-    pktgen.sendline(f'run("{duration}")')
+    if mode ==2:
+        pktgen.sendline(f'run("{duration}","{1}")')
+    else:
+        pktgen.sendline(f'run("{duration}","{0}")')
+
     time.sleep(1)
 
     if mode == 1:
@@ -241,17 +244,11 @@ def run_once(exp_cmd, mode, curr_t, pkt_size, duration, pktgen):
 
     if mode == 2:
         # Parse Latency statistics
-        latency_values = get_latency_data()
-        count_latency = latency_values[0]
-        min_latency = latency_values[1]
-        max_latency = latency_values[2]
-        avg_latency = latency_values[3]
-        tail99_latency = latency_values[4]
-        tail999_latency = latency_values[5]
+        min_latency,max_latency,avg_latency = get_latency_data()
+
 
         row = [" ", tx_pkts, rx_pkts, formatted_loss, curr_t, rx_dropped, rx_invalid, rx_queue_full,
-               rx_fill_ring_empty, out_of_order, count_latency, min_latency, max_latency, avg_latency, tail99_latency,
-               tail999_latency]
+               rx_fill_ring_empty, out_of_order, min_latency, max_latency, max_latency, avg_latency]
 
     if mode == 1:
         # Parse cache statistics
@@ -336,28 +333,27 @@ def run_all(experiments, max_rate, pkt_size, duration, pktgen):
         # row = run_till_zero(x, 0, max_rate, pkt_size, duration, pktgen)
         # write_row_to_file(TP_FILENAME, row)
 
-        # cache
-        row = run_till_zero(x, 1, max_rate, pkt_size, duration, pktgen)
-        write_row_to_file(CACHE_FILENAME, row)
+        # # cache
+        # row = run_till_zero(x, 1, max_rate, pkt_size, duration, pktgen)
+        # write_row_to_file(CACHE_FILENAME, row)
 
 
-        # # latency
-        # row = run_till_zero(x, 2, max_rate, pkt_size, duration, pktgen)
-        # write_row_to_file(LATENCY_FILENAME, row)
+        # latency
+        row = run_till_zero(x, 2, max_rate, pkt_size, duration, pktgen)
+        write_row_to_file(LATENCY_FILENAME, row)
 
 
 #######################   Setup   ##################################
 # Write header
 
-# header = ["MODE", 'tx_pkts', 'rx_pkts', 'loss %', 'curr_t', 'rx_dropped', 'rx_invalid', 'rx_queue_full',
-#           'rx_fill_ring_empty', 'out_of_order', 'count_latency', 'min_latency', 'max_latency', 'avg_latency',
-#           'tail99_latency', 'tail999_latency']
-# write_row_to_file(LATENCY_FILENAME, header)
+header = ["MODE", 'tx_pkts', 'rx_pkts', 'loss %', 'curr_t', 'rx_dropped', 'rx_invalid', 'rx_queue_full',
+          'rx_fill_ring_empty', 'out_of_order', 'count_latency', 'min_latency', 'max_latency', 'avg_latency']
+write_row_to_file(LATENCY_FILENAME, header)
 
-header = ["MODE", 'tx_pkts', 'rx_pkts', 'formatted_loss', 'curr_t',  'rx_dropped', 'rx_invalid', 'rx_queue_full',
-          'rx_fill_ring_empty', 'out_of_order', 'L1_dcache_miss_percent', 'L2_miss_percent', 'LLC_miss_percent', 'L1_dcache_loads', 'L1_dcache_load_misses', 'L1_icache_load_misses','L2_RQSTS_REFERENCES', 'L2_RQSTS_MISS', 'LONGEST_LAT_CACHE_REFERENCE', 'LONGEST_LAT_CACHE_MISS', 'INST_RETIRED_ANY','L1D_HWPF_MISS','L2_RQSTS_ALL_HWPF', 'L2_RQSTS_HWPF_MISS', 'L2_TRANS_L2_WB', 'L2_LINES_IN_ALL', 'L2_LINES_OUT_NON_SILENT',
-    'L2_LINES_OUT_SILENT', 'OCR_HWPF_L3_L3_HIT', 'OCR_HWPF_L3_L3_MISS', 'L2_RQSTS_SWPF_HIT', 'L2_RQSTS_SWPF_MISS', 'SW_PREFETCH_ACCESS_ANY', 'SW_PREFETCH_ACCESS_T0', 'SW_PREFETCH_ACCESS_T1_T2','core0_int','core1_int']
-write_row_to_file(CACHE_FILENAME, header)
+# header = ["MODE", 'tx_pkts', 'rx_pkts', 'formatted_loss', 'curr_t',  'rx_dropped', 'rx_invalid', 'rx_queue_full',
+#           'rx_fill_ring_empty', 'out_of_order', 'L1_dcache_miss_percent', 'L2_miss_percent', 'LLC_miss_percent', 'L1_dcache_loads', 'L1_dcache_load_misses', 'L1_icache_load_misses','L2_RQSTS_REFERENCES', 'L2_RQSTS_MISS', 'LONGEST_LAT_CACHE_REFERENCE', 'LONGEST_LAT_CACHE_MISS', 'INST_RETIRED_ANY','L1D_HWPF_MISS','L2_RQSTS_ALL_HWPF', 'L2_RQSTS_HWPF_MISS', 'L2_TRANS_L2_WB', 'L2_LINES_IN_ALL', 'L2_LINES_OUT_NON_SILENT',
+#     'L2_LINES_OUT_SILENT', 'OCR_HWPF_L3_L3_HIT', 'OCR_HWPF_L3_L3_MISS', 'L2_RQSTS_SWPF_HIT', 'L2_RQSTS_SWPF_MISS', 'SW_PREFETCH_ACCESS_ANY', 'SW_PREFETCH_ACCESS_T0', 'SW_PREFETCH_ACCESS_T1_T2','core0_int','core1_int']
+# write_row_to_file(CACHE_FILENAME, header)
 
 # header = ["MODE", 'tx_pkts', 'rx_pkts', 'loss %', 'curr_t', 'rx_dropped', 'rx_invalid', 'rx_queue_full',
 #            'rx_fill_ring_empty', 'out_of_order']
@@ -385,251 +381,45 @@ defer_napi_irqs()
 set_gro_timeout()
 
 prev = get_interrupt_counts()
-
+MLC_ON =0
 ##############################################################
-MLC_ON =0
 
-set_rx_ring_size(256)
+# App_type =[0,1,2,3,4,5]
+App_type =[5]
+
+set_rx_ring_size(4096)
 time.sleep(1)
-myrow=["Ring size 256"]
+myrow=["Ring size "+str(4096)]
 write_row_to_files(myrow)
 
-
-# MAC Swap
-experiments = [
-    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-s','512','-B'],
-    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-s','512','-B','-P'],
-    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-s','512','-B','-W'],
-    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-s','512','-B','-W','-P'],
+for at in App_type:
+    experiments = [
+    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-s','512','-W','-B','-A',str(at)],
+    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','8192','-s','512','-B','-A',str(at)],
+    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','4096','-s','512','-B','-A',str(at)],
+    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','2048','-s','512','-B','-A',str(at)],
+    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','1024','-s','512','-B','-A',str(at)],
+    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','512','-s','512','-B','-A',str(at)],
+    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','256','-s','512','-B','-A',str(at)],
     ]
-
-# args: experiments, max_rate(%), pkt_size(bytes), duration(ms), pktgen (pexpect spawn)
-run_all(experiments, 100, 512, 30000, pktgen)
-
-
-# Read every line
-experiments = [
-    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-s','512','-B','-r'],
-    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-s','512','-B','-P','-r'],
-    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-s','512','-B','-W','-r'],
-    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-s','512','-B','-W','-P','-r'],
-    ]
-
-# args: experiments, max_rate(%), pkt_size(bytes), duration(ms), pktgen (pexpect spawn)
-run_all(experiments, 100, 512, 30000, pktgen)
-
-
-
-# Write every line
-experiments = [
-    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-s','512','-B','-a'],
-    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-s','512','-B','-P','-a'],
-    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-s','512','-B','-W','-a'],
-    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-s','512','-B','-W','-P','-a'],
-    ]
-
-# args: experiments, max_rate(%), pkt_size(bytes), duration(ms), pktgen (pexpect spawn)
-run_all(experiments, 100, 512, 30000, pktgen)
-
-
-#####################################################################################
-
-MLC_ON =0
-
-set_rx_ring_size(512)
-time.sleep(1)
-myrow=["Ring size 512"]
-write_row_to_files(myrow)
-
-
-# MAC Swap
-experiments = [
-    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-s','512','-B'],
-    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-s','512','-B','-P'],
-    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-s','512','-B','-W'],
-    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-s','512','-B','-W','-P'],
-    ]
-
-# args: experiments, max_rate(%), pkt_size(bytes), duration(ms), pktgen (pexpect spawn)
-run_all(experiments, 100, 512, 30000, pktgen)
-
-
-# Read every line
-experiments = [
-    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-s','512','-B','-r'],
-    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-s','512','-B','-P','-r'],
-    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-s','512','-B','-W','-r'],
-    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-s','512','-B','-W','-P','-r'],
-    ]
-
-# args: experiments, max_rate(%), pkt_size(bytes), duration(ms), pktgen (pexpect spawn)
-run_all(experiments, 100, 512, 30000, pktgen)
-
-
-
-# Write every line
-experiments = [
-    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-s','512','-B','-a'],
-    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-s','512','-B','-P','-a'],
-    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-s','512','-B','-W','-a'],
-    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-s','512','-B','-W','-P','-a'],
-    ]
-
-# args: experiments, max_rate(%), pkt_size(bytes), duration(ms), pktgen (pexpect spawn)
-run_all(experiments, 100, 512, 30000, pktgen)
-
-#####################################################################
-
-
-MLC_ON = 1
-
-set_rx_ring_size(512)
-time.sleep(1)
-myrow=["Ring size 512"]
-write_row_to_files(myrow)
-
-
-# MAC Swap
-experiments = [
-    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-s','512','-B'],
-    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-s','512','-B','-P'],
-    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-s','512','-B','-W'],
-    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-s','512','-B','-W','-P'],
-    ]
-
-# args: experiments, max_rate(%), pkt_size(bytes), duration(ms), pktgen (pexpect spawn)
-run_all(experiments, 100, 512, 30000, pktgen)
-
-
-# Read every line
-experiments = [
-    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-s','512','-B','-r'],
-    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-s','512','-B','-P','-r'],
-    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-s','512','-B','-W','-r'],
-    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-s','512','-B','-W','-P','-r'],
-    ]
-
-# args: experiments, max_rate(%), pkt_size(bytes), duration(ms), pktgen (pexpect spawn)
-run_all(experiments, 100, 512, 30000, pktgen)
-
-
-
-# Write every line
-experiments = [
-    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-s','512','-B','-a'],
-    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-s','512','-B','-P','-a'],
-    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-s','512','-B','-W','-a'],
-    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-s','512','-B','-W','-P','-a'],
-    ]
-
-# args: experiments, max_rate(%), pkt_size(bytes), duration(ms), pktgen (pexpect spawn)
-run_all(experiments, 100, 512, 30000, pktgen)
-
-
-######################################################
-
-MLC_ON = 0
-
-set_rx_ring_size(512)
-time.sleep(1)
-myrow=["Ring size 512"]
-write_row_to_files(myrow)
-
-
-# MAC Swap
-experiments = [
-    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','4096','-s','512','-B'],
-    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','4096','-s','512','-B','-P'],
-    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','4096','-s','512','-B','-W'],
-    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','4096','-s','512','-B','-W','-P'],
-    ]
-
-# args: experiments, max_rate(%), pkt_size(bytes), duration(ms), pktgen (pexpect spawn)
-run_all(experiments, 100, 512, 30000, pktgen)
-
-
-# Read every line
-experiments = [
-    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','4096','-s','512','-B','-r'],
-    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','4096','-s','512','-B','-P','-r'],
-    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','4096','-s','512','-B','-W','-r'],
-    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','4096','-s','512','-B','-W','-P','-r'],
-    ]
-
-# args: experiments, max_rate(%), pkt_size(bytes), duration(ms), pktgen (pexpect spawn)
-run_all(experiments, 100, 512, 30000, pktgen)
-
-
-
-# Write every line
-experiments = [
-    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','4096','-s','512','-B','-a'],
-    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','4096','-s','512','-B','-P','-a'],
-    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','4096','-s','512','-B','-W','-a'],
-    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','4096','-s','512','-B','-W','-P','-a'],
-    ]
-
-# args: experiments, max_rate(%), pkt_size(bytes), duration(ms), pktgen (pexpect spawn)
-run_all(experiments, 100, 512, 30000, pktgen)
-
-
-######################################################
-
-MLC_ON =0
-
-set_rx_ring_size(512)
-time.sleep(1)
-myrow=["Ring size 512"]
-write_row_to_files(myrow)
-
-
-# MAC Swap
-experiments = [
-    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-s','64','-B'],
-    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-s','64','-B','-P'],
-    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-s','64','-B','-W'],
-    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-s','64','-B','-W','-P'],
-    ]
-
-# args: experiments, max_rate(%), pkt_size(bytes), duration(ms), pktgen (pexpect spawn)
-run_all(experiments, 40, 64, 30000, pktgen)
-
-
-######################################################
-MLC_ON = 0
-
-set_rx_ring_size(2048)
-time.sleep(1)
-myrow=["Ring size 2048"]
-write_row_to_files(myrow)
-
-
-# Default Mode
-experiments = [
-    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-s','512','-B'],
-    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-s','512','-B','-r'],
-    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-s','512','-B','-a'],
-    ]
-
-# args: experiments, max_rate(%), pkt_size(bytes), duration(ms), pktgen (pexpect spawn)
-run_all(experiments, 100, 512, 30000, pktgen)
-
-###########################################################
-
-MLC_ON = 0
-
-set_rx_ring_size(8192)
-time.sleep(1)
-myrow=["Ring size 8192"]
-write_row_to_files(myrow)
-
-
-# Default Mode
-experiments = [
-    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-s','512','-B'],
-    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-s','512','-B','-r'],
-    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-s','512','-B','-a'],
-    ]
-
-# args: experiments, max_rate(%), pkt_size(bytes), duration(ms), pktgen (pexpect spawn)
-run_all(experiments, 100, 512, 30000, pktgen)
+    run_all(experiments, 50, 512, 30000, pktgen)
+    run_all(experiments, 40, 512, 30000, pktgen)
+        
+
+# set_rx_ring_size(512)
+# time.sleep(1)
+# myrow=["Ring size "+str(512)]
+# write_row_to_files(myrow)
+
+# for at in App_type:
+#     experiments = [
+#     ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-s','512','-W','-B','-A',str(at)],
+#     # ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','8192','-s','512','-B','-A',str(at)],
+#     # ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','4096','-s','512','-B','-A',str(at)],
+#     # ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','2048','-s','512','-B','-A',str(at)],
+#     # ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','1024','-s','512','-B','-A',str(at)],
+#     # ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','512','-s','512','-B','-A',str(at)],
+#     # ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','256','-s','512','-B','-A',str(at)],
+#     ]
+#     run_all(experiments, 100, 512, 30000, pktgen)
+        
