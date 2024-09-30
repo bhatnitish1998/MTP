@@ -32,12 +32,10 @@ end
 
 function enable_latency()
     pktgen.latency("all", "enable");
-    printf("latency-enabled\n");
 end
 
 function disable_latency()
     pktgen.latency("all", "disable");
-    printf("latency-disabled\n");
 end
 
 
@@ -78,7 +76,6 @@ function setup()
 end
 
 
-
 function configure(rate,packet_size)
     pktgen.set("all", "rate", rate);
     pktgen.set("all", "size", packet_size);
@@ -88,9 +85,9 @@ end
 
 
 function run(duration,mode)
-    if(mode ==1)
+    if(mode =="1")
     then 
-        enable_latency()
+        enable_latency();
     end
 
     pktgen.delay(1000)
@@ -99,26 +96,16 @@ function run(duration,mode)
     pktgen.stop("all")
     pktgen.delay(1000)
     log_stats()
-    if(mode ==1)
+    if(mode =="1")
     then
-        log_latency()
-        disable_latency()
+        log_latency();
+        pktgen.delay(1000)
+        disable_latency();
     end
     pktgen.delay(1000)
     printf("run-done\n");
 end
 
-
-function run(duration)
-    pktgen.delay(1000)
-    pktgen.start("all")
-    pktgen.delay(duration)
-    pktgen.stop("all")
-    pktgen.delay(1000)
-    log_stats()
-    pktgen.delay(1000)
-    printf("run-done\n");
-end
 
 function cleanup()
     pktgen.clear("all")
