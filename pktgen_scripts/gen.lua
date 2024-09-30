@@ -2,7 +2,9 @@ package.path = package.path ..";?.lua;test/?.lua;app/?.lua;../?.lua;/usr/local?.
 require "Pktgen"
 
 -- global parameters
-file_path = "/home/magnus/nitish/MTP/pktgen_scripts/pkt_stat.txt"
+file_path = "/home/magnus/nitish/MTP/pktgen_scripts/pkt_stat.txt";
+latency_path = "/home/magnus/nitish/MTP/pktgen_scripts/latency.txt";
+
 
 -- functions
 function wait_link()
@@ -16,7 +18,6 @@ function wait_link()
     end
 end
 
--- functions
 function log_stats()
 
     local port = pktgen.portStats("0","port")
@@ -29,6 +30,32 @@ function log_stats()
     pktgen.delay(1000)
 end 
 
+function enable_latency()
+    pktgen.latency("all", "enable");
+    printf("latency-enabled\n");
+end
+
+function disable_latency()
+    pktgen.latency("all", "disable");
+    printf("latency-disabled\n");
+end
+
+
+function log_latency()
+    local port_stats = pktgen.pktStats("all");
+
+    local min1 = port_stats[0].latency.min_us
+    local max1 = port_stats[0].latency.max_us
+    local avg1 = port_stats[0].latency.avg_us
+
+    local file = io.open(latency_path, "w")
+    file:write(tostring(min1) .. "\n")
+    file:write(tostring(max1) .. "\n")
+    file:write(tostring(avg1) .. "\n")
+    file:close()
+    pktgen.delay(1000)
+
+end
 ----------------------------------------------------------
 
 function setup()
@@ -60,6 +87,28 @@ function configure(rate,packet_size)
 end
 
 
+function run(duration,mode)
+    if(mode ==1)
+    then 
+        enable_latency()
+    end
+
+    pktgen.delay(1000)
+    pktgen.start("all")
+    pktgen.delay(duration)
+    pktgen.stop("all")
+    pktgen.delay(1000)
+    log_stats()
+    if(mode ==1)
+    then
+        log_latency()
+        disable_latency()
+    end
+    pktgen.delay(1000)
+    printf("run-done\n");
+end
+
+
 function run(duration)
     pktgen.delay(1000)
     pktgen.start("all")
@@ -70,7 +119,6 @@ function run(duration)
     pktgen.delay(1000)
     printf("run-done\n");
 end
-
 
 function cleanup()
     pktgen.clear("all")
