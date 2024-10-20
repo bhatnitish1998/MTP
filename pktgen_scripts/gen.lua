@@ -106,6 +106,26 @@ function run(duration,mode)
     printf("run-done\n");
 end
 
+function run_burst(duration,interval_time,rate)
+    duration = tonumber(duration)
+    interval_time = tonumber(interval_time)
+    local intervals = duration/interval_time
+    local iteration = 0
+    pktgen.set("all", "rate", rate)
+    pktgen.set("all","count",16384*4)
+    while (iteration < intervals) do
+        pktgen.start("all")
+        pktgen.delay(interval_time*4)
+        pktgen.stop("all")
+        iteration = iteration + 4
+    end
+    pktgen.stop("all")
+    pktgen.set("all","count",0)
+    pktgen.delay(1000)
+    log_stats()
+    pktgen.delay(1000)
+    printf("run-done\n");
+end
 
 function cleanup()
     pktgen.clear("all")
