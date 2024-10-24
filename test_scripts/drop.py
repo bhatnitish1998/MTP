@@ -13,12 +13,10 @@ IFNAME = 'ens19f0np0'
 PKTGEN = '/home/magnus/packetgen/Pktgen-DPDK/builddir/app/pktgen'
 PKTGEN_SCRIPT = '/home/magnus/nitish/MTP/pktgen_scripts/gen.lua' 
 PKTGEN_STAT = '/home/magnus/nitish/MTP/pktgen_scripts/pkt_stat.txt'
-LATENCY_STAT = '/home/magnus/nitish/MTP/pktgen_scripts/latency.txt'
 
 APP_NAME = 'xdpsock'
 APP_PATH = f'/home/magnus/nitish/MTP/bpf/AF_XDP/{APP_NAME}'
 
-LATENCY_FILENAME = 'latency_results.csv'
 CACHE_FILENAME = 'cache_results.csv'
 TP_FILENAME = 'tp_results.csv'
 
@@ -26,12 +24,16 @@ EXP_TIME = 30
 
 PERF_COUNTERS = ['L2_RQSTS.REFERENCES', 'L2_RQSTS.MISS', 'LONGEST_LAT_CACHE.REFERENCE', 'LONGEST_LAT_CACHE.MISS',
                  'INST_RETIRED.ANY', 'L2_LINES_IN.ALL', 'L2_LINES_OUT.NON_SILENT', 'L2_LINES_OUT.SILENT', 'L2_RQSTS.SWPF_HIT', 'L2_RQSTS.SWPF_MISS',  
-                 'SW_PREFETCH_ACCESS.T0', 'SW_PREFETCH_ACCESS.T1_T2','L1-dcache-loads', 'L1-dcache-load-misses', 'L1-icache-load-misses','cycles','instructions'
+                 'SW_PREFETCH_ACCESS.T0', 'SW_PREFETCH_ACCESS.T1_T2','L1-dcache-loads', 'L1-dcache-load-misses', 'L1-icache-load-misses',
                 ]
 
 MLC_ON = 0         
 MLC_START_CORE = 3
 LOSS = 0.001
+
+RATE = 100
+INTERVAL = 5000
+PKT_SIZE = 512
 
 ######### Interrupt params
 prev0 = 0
@@ -78,19 +80,6 @@ def set_rx_ring_size(rx_size):
     except:
         pass
 
-# raises exception if ring size didnt change
-def set_tx_ring_size(tx_size):
-    try:
-        command = f"sudo ethtool -G ens19f0np0 tx {tx_size}"
-        subprocess.run(['sudo', 'bash', '-c', command], check=True)
-    except:
-        pass
-
-
-def set_rss():
-    cmd = f"ethtool -X ens19f0np0 start 0 equal 1"
-    subprocess.run(['sudo', 'bash', '-c', cmd], check=True)
-
 
 def kill_mlc():
     cmd = ['sudo', 'killall', '-SIGINT', 'mlc']
@@ -112,30 +101,11 @@ def get_pktgen_stats():
     return int(ret[0])
 
 
-def change_ddio(value):
-    cmd = ['sudo', '/home/magnus/nitish/MTP/ddio/change-ddio', str(value)]
-    ret = subprocess.run(cmd)
-
-# 1 = enable  0 = disable prefetch
-def change_pfrefetch(value):
-    if (value):
-        cmd = ['sudo', 'wrmsr', '0x1a4', '-a', '32']
-        ret = subprocess.run(cmd)
-        cmd = ['sudo', 'wrmsr', '0x6d', '-a', '1073790976']
-        ret = subprocess.run(cmd)
-    else:
-        cmd = ['sudo', 'wrmsr', '0x1a4', '-a', '47']
-        ret = subprocess.run(cmd)
-        cmd = ['sudo', 'wrmsr', '0x6d', '-a', '4399120302080']
-        ret = subprocess.run(cmd)
-
-
 def set_interrupts_core():
     # for i in range(144,192):
     for i in range(144,145):
         command = f"echo {INT_CORE} > /proc/irq/{i}/smp_affinity"
         subprocess.run(['sudo', 'bash', '-c', command], check=True)
-
 
 def kill_process():
     cmd = ['pidof', APP_NAME]
@@ -151,23 +121,8 @@ def get_rcvd_pkts():
     value = rows[0][1]
     return int(value)
 
-
-def get_latency_data():
-    cmd = ['scp', f'{TESTER}:{LATENCY_STAT}', '.']
-    proc = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    time.sleep(1)
-    with open("latency.txt", "r") as f:
-        ret = f.read().splitlines()
-    return float(ret[0]),float(ret[1]),float(ret[2])
-
-
-
 def write_row_to_files(row):
     with open(TP_FILENAME, 'a', newline='') as file:
-        writer = csv.writer(file)
-        writer.writerow(row)
-
-    with open(LATENCY_FILENAME, 'a', newline='') as file:
         writer = csv.writer(file)
         writer.writerow(row)
 
@@ -185,7 +140,6 @@ def write_row_to_file(filename, row):
 
 # mode 0 = throughput   
 # mode 1 = cache    
-# mode 2 = latency
 def run_once(exp_cmd, mode, curr_t, pkt_size, duration, pktgen):
     curr_cmd = exp_cmd.copy()
 
@@ -200,21 +154,13 @@ def run_once(exp_cmd, mode, curr_t, pkt_size, duration, pktgen):
     # start xdp
     app = subprocess.Popen(curr_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-    # configure pktgen
-    pktgen.sendline(f'configure("{curr_t}","{pkt_size}")')
-    pktgen.expect('config-done')
 
-    # start pktgen
-    if mode ==2:
-        pktgen.sendline(f'run("{duration}","{1}")')
-    else:
-        pktgen.sendline(f'run("{duration}","{0}")')
+    pktgen.sendline(f'run_burst("{duration}","{INTERVAL}","{RATE}")')
 
     time.sleep(1)
 
     if mode == 1:
         cmd = ['pidof', APP_NAME]
-        # cmd = ['pidof', 'mlc']
         pid = subprocess.run(cmd, capture_output=True, text=True)
         perf = ['sudo', 'perf', 'stat', '--no-big-num', '-e', ','.join(PERF_COUNTERS), '-p', str(int(pid.stdout))]
         perf_res = subprocess.Popen(perf, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
@@ -250,13 +196,6 @@ def run_once(exp_cmd, mode, curr_t, pkt_size, duration, pktgen):
 
     formatted_loss = f"{loss * 100:.3f}"
 
-    if mode == 2:
-        # Parse Latency statistics
-        min_latency,max_latency,avg_latency = get_latency_data()
-
-
-        row = [" ", tx_pkts, rx_pkts, formatted_loss, curr_t, rx_dropped, rx_invalid, rx_queue_full,
-               rx_fill_ring_empty, out_of_order, min_latency, max_latency, avg_latency]
 
     if mode == 1:
         # Parse cache statistics
@@ -277,10 +216,7 @@ def run_once(exp_cmd, mode, curr_t, pkt_size, duration, pktgen):
         L1_dcache_loads = int(reslines[15].split()[0])
         L1_dcache_load_misses = int(reslines[16].split()[0])
         L1_icache_load_misses = int(reslines[17].split()[0])
-        cycles = int(reslines[18].split()[0])
-        instructions = int(reslines[19].split()[0])
 
-        IPC = instructions/cycles
 
         LLC_miss_percent = f"{(LONGEST_LAT_CACHE_MISS / LONGEST_LAT_CACHE_REFERENCE) * 100:.4f}"
         L2_miss_percent = f"{(L2_RQSTS_MISS / L2_RQSTS_REFERENCES) * 100:.4f}"
@@ -289,13 +225,11 @@ def run_once(exp_cmd, mode, curr_t, pkt_size, duration, pktgen):
         core0_int, core1_int = get_interrupt_counts()
 
         row = [" ", tx_pkts, rx_pkts, formatted_loss, curr_t, rx_dropped, rx_invalid, rx_queue_full, rx_fill_ring_empty, out_of_order, L1_dcache_miss_percent, L2_miss_percent, LLC_miss_percent, L1_dcache_loads, L1_dcache_load_misses, L1_icache_load_misses, L2_RQSTS_REFERENCES, L2_RQSTS_MISS, LONGEST_LAT_CACHE_REFERENCE, LONGEST_LAT_CACHE_MISS, INST_RETIRED_ANY, L2_LINES_IN_ALL, L2_LINES_OUT_NON_SILENT,
-        L2_LINES_OUT_SILENT, L2_RQSTS_SWPF_HIT, L2_RQSTS_SWPF_MISS, SW_PREFETCH_ACCESS_T0, SW_PREFETCH_ACCESS_T1_T2,core0_int,core1_int,cycles,instructions,IPC]
-        write_row_to_file(CACHE_FILENAME,row)
+        L2_LINES_OUT_SILENT, L2_RQSTS_SWPF_HIT, L2_RQSTS_SWPF_MISS, SW_PREFETCH_ACCESS_T0, SW_PREFETCH_ACCESS_T1_T2,core0_int,core1_int,INTERVAL]
 
     if mode == 0:
         row = [" ",tx_pkts, rx_pkts, formatted_loss, curr_t, rx_dropped, rx_invalid, rx_queue_full,
-               rx_fill_ring_empty, out_of_order]
-        write_row_to_file(TP_FILENAME,row)
+               rx_fill_ring_empty, out_of_order,INTERVAL]
     
     # Clear pktgen statistics
     pktgen.sendline('cleanup()')
@@ -305,63 +239,36 @@ def run_once(exp_cmd, mode, curr_t, pkt_size, duration, pktgen):
     return loss, row
 
 
-def run_till_zero(exp_cmd, mode, max_rate, pkt_size, duration, pktgen):
-    curr_t = max_rate
-
-    while True:
-        loss, row = run_once(exp_cmd, mode, curr_t, pkt_size, 10000, pktgen)
-        if loss < LOSS:
-            curr_t = min(max_rate, curr_t + 4)
-            break
-        curr_t = curr_t - 5
-
-    while True:
-        loss, row = run_once(exp_cmd, mode, curr_t, pkt_size, 10000, pktgen)
-        if loss < LOSS:
-            curr_t = min(max_rate, curr_t + 1.5)
-            break
-        curr_t = curr_t - 2
-
-    while True:
-        loss, row = run_once(exp_cmd, mode, curr_t, pkt_size, duration, pktgen)
-        if loss < LOSS:
-            return row
-        curr_t = curr_t - 0.5
 
 
 def run_all(experiments, max_rate, pkt_size, duration, pktgen):
     for x in experiments:
         write_row_to_files(x)
 
-        # # throughput
-        # row = run_till_zero(x, 0, max_rate, pkt_size, duration, pktgen)
-        # write_row_to_file(TP_FILENAME, row)
+        # throughput
+        loss,row = run_once(x, 1, max_rate, pkt_size, duration, pktgen)
+        write_row_to_file(TP_FILENAME, row)
 
-        # cache
-        row = run_till_zero(x, 1, max_rate, pkt_size, duration, pktgen)
-        write_row_to_file(CACHE_FILENAME, row)
+        # # cache
+        # loss,row = run_once(x, 1, max_rate, pkt_size, duration, pktgen)
+        # write_row_to_file(CACHE_FILENAME, row)
 
 
-        # # latency
-        # row = run_till_zero(x, 2, max_rate, pkt_size, duration, pktgen)
-        # write_row_to_file(LATENCY_FILENAME, row)
+
 
 
 #######################   Setup   ##################################
 # Write header
 
-# header = ["MODE", 'tx_pkts', 'rx_pkts', 'loss %', 'curr_t', 'rx_dropped', 'rx_invalid', 'rx_queue_full',
-#           'rx_fill_ring_empty', 'out_of_order', 'count_latency', 'min_latency', 'max_latency', 'avg_latency']
-# write_row_to_file(LATENCY_FILENAME, header)
 
-header = ["MODE", 'tx_pkts', 'rx_pkts', 'formatted_loss', 'curr_t',  'rx_dropped', 'rx_invalid', 'rx_queue_full',
-          'rx_fill_ring_empty', 'out_of_order', 'L1_dcache_miss_percent', 'L2_miss_percent', 'LLC_miss_percent', 'L1_dcache_loads', 'L1_dcache_load_misses', 'L1_icache_load_misses','L2_RQSTS_REFERENCES', 'L2_RQSTS_MISS', 'LONGEST_LAT_CACHE_REFERENCE', 'LONGEST_LAT_CACHE_MISS', 'INST_RETIRED_ANY', 'L2_LINES_IN_ALL', 'L2_LINES_OUT_NON_SILENT',
-    'L2_LINES_OUT_SILENT', 'L2_RQSTS_SWPF_HIT', 'L2_RQSTS_SWPF_MISS', 'SW_PREFETCH_ACCESS_T0', 'SW_PREFETCH_ACCESS_T1_T2','core0_int','core1_int','cycles','instructions','IPC']
-write_row_to_file(CACHE_FILENAME, header)
+# header = ["MODE", 'tx_pkts', 'rx_pkts', 'formatted_loss', 'curr_t',  'rx_dropped', 'rx_invalid', 'rx_queue_full',
+#           'rx_fill_ring_empty', 'out_of_order', 'L1_dcache_miss_percent', 'L2_miss_percent', 'LLC_miss_percent', 'L1_dcache_loads', 'L1_dcache_load_misses', 'L1_icache_load_misses','L2_RQSTS_REFERENCES', 'L2_RQSTS_MISS', 'LONGEST_LAT_CACHE_REFERENCE', 'LONGEST_LAT_CACHE_MISS', 'INST_RETIRED_ANY', 'L2_LINES_IN_ALL', 'L2_LINES_OUT_NON_SILENT',
+#     'L2_LINES_OUT_SILENT', 'L2_RQSTS_SWPF_HIT', 'L2_RQSTS_SWPF_MISS', 'SW_PREFETCH_ACCESS_T0', 'SW_PREFETCH_ACCESS_T1_T2','core0_int','core1_int','INTERVAL']
+# write_row_to_file(CACHE_FILENAME, header)
 
-# header = ["MODE", 'tx_pkts', 'rx_pkts', 'loss %', 'curr_t', 'rx_dropped', 'rx_invalid', 'rx_queue_full',
-#            'rx_fill_ring_empty', 'out_of_order']
-# write_row_to_file(TP_FILENAME, header)
+header = ["MODE", 'tx_pkts', 'rx_pkts', 'loss %', 'curr_t', 'rx_dropped', 'rx_invalid', 'rx_queue_full',
+           'rx_fill_ring_empty', 'out_of_order','INTERVAL']
+write_row_to_file(TP_FILENAME, header)
 
 
 # Setup pktgen
@@ -374,6 +281,10 @@ time.sleep(1)
 pktgen.sendline('setup()')
 pktgen.expect('setup-done')
 time.sleep(1)
+# configure pktgen
+pktgen.sendline(f'configure("{RATE}","{PKT_SIZE}")')
+pktgen.expect('config-done')
+
 
 # Set default configurations
 
@@ -385,46 +296,25 @@ defer_napi_irqs()
 set_gro_timeout()
 
 prev = get_interrupt_counts()
-MLC_ON =1
+MLC_ON =0
 ##############################################################
 
-# app_type = [0,1,2,5]
-# ideal_umem_size = [512,512,512,1024]
-# ideal_ring_size =[2048,2048,4096,4096]
-
-app_type = [0,1,2,5]
-ideal_umem_size = [512,512,512,1024]
-ideal_ring_size =[2048,2048,4096,4096]
-
-# umem_size=[16384,4096,2048,1024,512,256]
-# ring_size=[8160,4096,2048,1024,512,256]
-
-
-set_tx_ring_size(256)
+set_rx_ring_size(256)
 time.sleep(1)
+myrow=["Ring size "+str(256)]
+write_row_to_files(myrow)
 
+App_type =[0]
+intervals =[1]
+tp = [3.125]
 
-for i in range(len(app_type)):
-
-    set_rx_ring_size(2048)
-    time.sleep(1)
-    myrow=["Ring size "+str(2048)]
+for i in range(len(App_type)):
+    INTERVAL = intervals[i]
+    at = App_type[i]
+    myrow=["Interval "+str(INTERVAL)]
     write_row_to_files(myrow)
-
     experiments = [
-    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-s','512','-B','-A',str(app_type[i])],
-
+    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-s','512','-B','-A',str(at),],
     ]
-    run_all(experiments, 80, 512, 30000, pktgen)
+    run_all(experiments, RATE, 512, 30000, pktgen)
 
-    set_rx_ring_size(256)
-    time.sleep(1)
-    myrow=["Ring size "+str(256)]
-    write_row_to_files(myrow)
-
-
-    experiments = [
-
-    ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-s','512','-B','-W','-A',str(app_type[i])],
-    ]
-    run_all(experiments, 80, 512, 30000, pktgen)

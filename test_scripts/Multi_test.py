@@ -103,7 +103,8 @@ def run_once(exp_cmds, curr_t, pkt_size, duration, pktgen):
     # start xdp
     for curr_cmd in exp_cmds:
         app = subprocess.Popen(curr_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        time.sleep(1)
+    
+    time.sleep(1)
     
     # configure pktgen
     pktgen.sendline(f'configure("{curr_t}","{pkt_size}")')
@@ -118,7 +119,7 @@ def run_once(exp_cmds, curr_t, pkt_size, duration, pktgen):
     time.sleep(1)
     # terminate processes
     kill_processes()
-
+    time.sleep(1)
     
     # get loss
     tx_pkts = get_pktgen_stats()
@@ -215,14 +216,102 @@ set_gro_timeout()
 
 ##############################################################
 
+APP_TYPE = 1
+
 set_rx_ring_size(256)
 time.sleep(1)
 myrow=["Ring size "+str(256)]
 write_row_to_files(myrow)
 
 
+myrow=["PKT 64 "]
+write_row_to_files(myrow)
+
 INT_CORES = 4
 
-cmds = setup_and_generate_commands(INT_CORES,16384,128,5)
+myrow=["Cores "+str(INT_CORES)]
+write_row_to_files(myrow)
 
-run_all(cmds, 20, 512, 30000, pktgen)
+cmds = setup_and_generate_commands(INT_CORES,16384,64,APP_TYPE)
+run_all(cmds, 100, 64, 30000, pktgen)
+
+
+INT_CORES = 2
+
+myrow=["Cores "+str(INT_CORES)]
+write_row_to_files(myrow)
+
+cmds = setup_and_generate_commands(INT_CORES,16384,64,APP_TYPE)
+run_all(cmds, 60, 64, 30000, pktgen)
+
+
+INT_CORES = 1
+
+myrow=["Cores "+str(INT_CORES)]
+write_row_to_files(myrow)
+
+cmds = setup_and_generate_commands(INT_CORES,16384,64,APP_TYPE)
+run_all(cmds, 30, 64, 30000, pktgen)
+
+
+
+myrow=["PKT 256 "]
+write_row_to_files(myrow)
+
+INT_CORES = 4
+
+myrow=["Cores "+str(INT_CORES)]
+write_row_to_files(myrow)
+
+cmds = setup_and_generate_commands(INT_CORES,16384,256,APP_TYPE)
+run_all(cmds, 100, 256, 30000, pktgen)
+
+
+
+INT_CORES = 2
+
+myrow=["Cores "+str(INT_CORES)]
+write_row_to_files(myrow)
+
+cmds = setup_and_generate_commands(INT_CORES,16384,256,APP_TYPE)
+run_all(cmds, 80, 256, 30000, pktgen)
+
+
+INT_CORES = 1
+
+myrow=["Cores "+str(INT_CORES)]
+write_row_to_files(myrow)
+
+cmds = setup_and_generate_commands(INT_CORES,16384,256,APP_TYPE)
+run_all(cmds, 70, 256, 30000, pktgen)
+
+
+myrow=["PKT 512 "]
+write_row_to_files(myrow)
+
+INT_CORES = 4
+
+myrow=["Cores "+str(INT_CORES)]
+write_row_to_files(myrow)
+
+cmds = setup_and_generate_commands(INT_CORES,16384,512,APP_TYPE)
+run_all(cmds, 100, 512, 30000, pktgen)
+
+
+
+INT_CORES = 2
+
+myrow=["Cores "+str(INT_CORES)]
+write_row_to_files(myrow)
+
+cmds = setup_and_generate_commands(INT_CORES,16384,512,APP_TYPE)
+run_all(cmds, 100, 512, 30000, pktgen)
+
+
+INT_CORES = 1
+
+myrow=["Cores "+str(INT_CORES)]
+write_row_to_files(myrow)
+
+cmds = setup_and_generate_commands(INT_CORES,16384,512,APP_TYPE)
+run_all(cmds, 100, 512, 30000, pktgen)

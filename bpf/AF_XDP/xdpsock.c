@@ -508,7 +508,6 @@ void post_exp_process()
 	if(opt_debug_addr)
 		debug_addresses();
 	
-
 }
 
 static void remove_xdp_program(void)
@@ -581,7 +580,7 @@ static void inline process_packet(void *data, size_t length, u64 addr)
 	{
 		unsigned char *pkt = (unsigned char *)data;
 		for(int i =0; i< length; i+=64)
-			pkt[i] = 'x';
+			pkt[i] = pkt[i+1];
 	}
 	if(opt_application_type == 1)
 	{
@@ -602,7 +601,7 @@ static void inline process_packet(void *data, size_t length, u64 addr)
 		if(pkt_count >10000)
 		{
 			pkt_count = 0;
-			dummy_primes+=get_prime_count(20);
+			dummy_primes+=get_prime_count(100);
 		}
 	}
 }
