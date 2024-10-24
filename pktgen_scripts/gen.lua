@@ -84,6 +84,45 @@ function configure(rate,packet_size)
 end
 
 
+function multi_configure(rate,packet_size)
+
+
+    pktgen.delay(1000);
+    pktgen.range.dst_ip("all", "start", "192.168.201.5");
+    pktgen.range.dst_ip("all", "inc", "0.0.0.0");
+    pktgen.range.dst_ip("all", "min", "192.168.201.5");
+    pktgen.range.dst_ip("all", "max", "192.168.201.5");
+
+    pktgen.delay(1000);
+    pktgen.range.src_ip("all", "start", "192.168.201.1");
+    pktgen.range.src_ip("all", "inc", "0.0.0.0");
+    pktgen.range.src_ip("all", "min", "192.168.201.1");
+    pktgen.range.src_ip("all", "max", "192.168.201.1");
+
+
+    pktgen.range.dst_mac("all", "start", "9c:69:b4:66:16:54");
+    pktgen.range.src_mac("all", "start", "9c:69:b4:66:16:54");
+
+
+    pktgen.set("all", "rate", rate);
+    pktgen.set("all", "size", packet_size);
+    pktgen.delay(1000);
+    pktgen.range.dst_port("all", "start", 1234);
+    pktgen.range.dst_port("all", "inc", 4);
+    pktgen.range.dst_port("all", "min", 1234);
+    pktgen.range.dst_port("all", "max", 2345);
+
+    pktgen.delay(1000);
+    pktgen.range.src_port("all", "start", 5678);
+    pktgen.range.src_port("all", "inc", 5);
+    pktgen.range.src_port("all", "min", 1234);
+    pktgen.range.src_port("all", "max", 9999);
+    
+    pktgen.set_range("all", "on");
+    pktgen.delay(1000);
+    printf("config-done\n");
+end
+
 function run(duration,mode)
     if(mode =="1")
     then 
@@ -109,15 +148,18 @@ end
 function run_burst(duration,interval_time,rate)
     duration = tonumber(duration)
     interval_time = tonumber(interval_time)
+
     local intervals = duration/interval_time
     local iteration = 0
+
     pktgen.set("all", "rate", rate)
-    pktgen.set("all","count",16384*4)
+    pktgen.set("all","count",8192)
     while (iteration < intervals) do
         pktgen.start("all")
-        pktgen.delay(interval_time*4)
+        pktgen.delay(interval_time)
         pktgen.stop("all")
-        iteration = iteration + 4
+        pktgen.delay(interval_time)
+        iteration = iteration + 2
     end
     pktgen.stop("all")
     pktgen.set("all","count",0)
