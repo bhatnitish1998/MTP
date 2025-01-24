@@ -171,6 +171,7 @@ u64 prev_consumer =0;
 struct addr_info addr_array[MAX_ADDRESS_COUNT];
 static int addr_count =0;
 
+u64 address_counting [16384];
 
 static bool opt_debug_addr = false;
 static const char *addr_file = "";
@@ -478,9 +479,10 @@ static void  debug_addresses()
 		}
 		for(u32 i = 0; i < addr_count; i++)
 		{
-			fprintf(file, "number:%u	address:%llu	length:%u\n",addr_array[i].number,
-					addr_array[i].addr/opt_xsk_frame_size,addr_array[i].len);
+			fprintf(file, "number:%u	address:%llu	length:%u   count: %llu\n",addr_array[i].number,
+					addr_array[i].addr/opt_xsk_frame_size,addr_array[i].len,address_counting[addr_array[i].addr/opt_xsk_frame_size]);
 		}
+
 		fclose(file);
 }
 
@@ -1058,7 +1060,9 @@ static void forward(struct xsk_socket_info *xsk)
 			addr_array[addr_count].number = i;
 			addr_array[addr_count].addr = addr;
 			addr_array[addr_count].len = len;
+			address_counting[addr/opt_xsk_frame_size]++;
 			addr_count++;
+
 		}
 
 		if (eop) {
@@ -1143,6 +1147,7 @@ static void receive(struct xsk_socket_info *xsk)
 			addr_array[addr_count].number = i;
 			addr_array[addr_count].addr = addr;
 			addr_array[addr_count].len = len;
+			address_counting[addr/opt_xsk_frame_size]++;
 			addr_count++;
 		}
 
