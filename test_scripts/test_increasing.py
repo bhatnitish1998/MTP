@@ -314,6 +314,8 @@ def run_till_loss(exp_cmd, mode, min_rate, pkt_size, duration, pktgen):
             curr_t = max(min_rate, curr_t - 4)
             break
         curr_t = curr_t + 5
+        if curr_t > 100:
+            break
         prev_row = row
 
     while True:
@@ -322,6 +324,8 @@ def run_till_loss(exp_cmd, mode, min_rate, pkt_size, duration, pktgen):
             curr_t = max(min_rate, curr_t - 1.5)
             break
         curr_t = curr_t + 2
+        if curr_t > 100:
+            break
         prev_row = row
 
     while True:
@@ -329,6 +333,8 @@ def run_till_loss(exp_cmd, mode, min_rate, pkt_size, duration, pktgen):
         if loss > LOSS:
             return prev_row
         curr_t = curr_t + 0.5
+        if curr_t > 100:
+            break
         prev_row = row
 
 
