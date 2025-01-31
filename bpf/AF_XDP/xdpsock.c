@@ -168,6 +168,9 @@ static int pkt_count=0;
 /////////////// Warm buffers & addresses  ////////////
 static bool opt_warm_buffers = false;
 
+static bool warm_bit [16384];
+static long long warm_count;
+static long long cold_count;
 struct addr_info{
 	u32 number;
 	u64 addr;
@@ -526,6 +529,9 @@ void post_exp_process()
 			fprintf(file, "rx_queue_full,%lu\n",xsks[i]->ring_stats.rx_full_npkts);
 			fprintf(file, "fill_ring_empty,%lu\n",xsks[i]->ring_stats.rx_fill_empty_npkts);
 			fprintf(file, "out_of_order,%llu\n",out_of_order-(xsks[i]->ring_stats.rx_npkts/umem_size));
+			// Warm buffer count
+			fprintf(file, "warm_count,%lld\n",warm_count);
+			fprintf(file, "cold_count,%lld\n",cold_count);
 			// Write dummy count to avoid compiler optimization
 			fprintf(file, "dummy_count,%d\n",dummy_count);
 			fprintf(file, "dummy_primes,%d\n",dummy_primes);
@@ -585,6 +591,11 @@ static void xdpsock_cleanup(void)
 
 static void inline process_packet(void *data, size_t length, u64 addr)
 {
+	// flag for kernel
+	
+	char *ptr1 = (char*) data;
+	ptr1[5] = 'W';
+
 	pkt_count++;
 
 	if(!(opt_application_type==2|| opt_application_type == 1)){
@@ -1024,8 +1035,10 @@ static inline void complete_tx_forward(struct xsk_socket_info *xsk)
 		{
 			u64 orig = *xsk_ring_cons__comp_addr(&umem->cq, idx_cq++);
 
-			if(opt_warm_buffers)
+			if(opt_warm_buffers){
 				custom_xsk_ring_prod__fill_addr(&umem->fq,idx_fq++,orig,(to_add+i));
+				warm_bit[orig/opt_xsk_frame_size] = true;
+			}
 			else
 				*xsk_ring_prod__fill_addr(&umem->fq, idx_fq++) = orig;
 		}
@@ -1077,6 +1090,13 @@ static void forward(struct xsk_socket_info *xsk)
 		u64 addr = desc->addr;
 		u32 len = desc->len;
 		u64 orig = xsk_umem__extract_addr(addr);
+
+		if(warm_bit[addr/opt_xsk_frame_size]== true)
+			warm_count++;
+		else
+			cold_count++;
+
+		warm_bit[addr/opt_xsk_frame_size] = false;
 
 		addr = xsk_umem__add_offset_to_addr(addr);
 		char *pkt = xsk_umem__get_data(xsk->umem->buffer, addr);
@@ -1165,10 +1185,19 @@ static void receive(struct xsk_socket_info *xsk)
 	// process each packets and put back the addresses of buffers
 	for (i = 0; i < rcvd; i++) {
 		const struct xdp_desc *desc = xsk_ring_cons__rx_desc(&xsk->rx, idx_rx++);
+
 		bool eop = IS_EOP_DESC(desc->options);
 		u64 addr = desc->addr;
 		u32 len = desc->len;
 		u64 orig = xsk_umem__extract_addr(addr);
+
+		if(warm_bit[addr/opt_xsk_frame_size]== true)
+			warm_count++;
+		else
+			cold_count++;
+
+		warm_bit[addr/opt_xsk_frame_size] = false;
+
 
 		addr = xsk_umem__add_offset_to_addr(addr);
 		char *pkt = xsk_umem__get_data(xsk->umem->buffer, addr);
@@ -1207,7 +1236,10 @@ static void receive(struct xsk_socket_info *xsk)
 		}
 
 		if(opt_warm_buffers)
+		{
 			custom_xsk_ring_prod__fill_addr(&xsk->umem->fq, idx_fq++,orig,(to_add + i));
+			warm_bit[orig/opt_xsk_frame_size] = true;
+		}
 		else
 			*xsk_ring_prod__fill_addr(&xsk->umem->fq, idx_fq++) = orig;
 	}
