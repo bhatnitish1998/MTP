@@ -245,6 +245,9 @@ def run_once(exp_cmd, mode, curr_t, pkt_size, duration, pktgen):
     rx_queue_full = rows[3][1]
     rx_fill_ring_empty = rows[4][1]
     out_of_order = rows[5][1]
+    warm_count = rows [6][1]
+    cold_count = rows [7][1]
+
 
     print(f'Target {curr_t} Gbps, loss {loss * 100:.2f}%\n')
 
@@ -289,7 +292,7 @@ def run_once(exp_cmd, mode, curr_t, pkt_size, duration, pktgen):
         core0_int, core1_int = get_interrupt_counts()
 
         row = [" ", tx_pkts, rx_pkts, formatted_loss, curr_t, rx_dropped, rx_invalid, rx_queue_full, rx_fill_ring_empty, out_of_order, L1_dcache_miss_percent, L2_miss_percent, LLC_miss_percent, L1_dcache_loads, L1_dcache_load_misses, L1_icache_load_misses, L2_RQSTS_REFERENCES, L2_RQSTS_MISS, LONGEST_LAT_CACHE_REFERENCE, LONGEST_LAT_CACHE_MISS, INST_RETIRED_ANY, L2_LINES_IN_ALL, L2_LINES_OUT_NON_SILENT,
-        L2_LINES_OUT_SILENT, L2_RQSTS_SWPF_HIT, L2_RQSTS_SWPF_MISS, SW_PREFETCH_ACCESS_T0, SW_PREFETCH_ACCESS_T1_T2,core0_int,core1_int,cycles,instructions,IPC]
+        L2_LINES_OUT_SILENT, L2_RQSTS_SWPF_HIT, L2_RQSTS_SWPF_MISS, SW_PREFETCH_ACCESS_T0, SW_PREFETCH_ACCESS_T1_T2,core0_int,core1_int,cycles,instructions,IPC,warm_count,cold_count]
         write_row_to_file(CACHE_FILENAME,row)
 
     if mode == 0:
@@ -365,7 +368,7 @@ def run_all(experiments, min_rate, pkt_size, duration, pktgen):
 
 header = ["MODE", 'tx_pkts', 'rx_pkts', 'formatted_loss', 'curr_t',  'rx_dropped', 'rx_invalid', 'rx_queue_full',
           'rx_fill_ring_empty', 'out_of_order', 'L1_dcache_miss_percent', 'L2_miss_percent', 'LLC_miss_percent', 'L1_dcache_loads', 'L1_dcache_load_misses', 'L1_icache_load_misses','L2_RQSTS_REFERENCES', 'L2_RQSTS_MISS', 'LONGEST_LAT_CACHE_REFERENCE', 'LONGEST_LAT_CACHE_MISS', 'INST_RETIRED_ANY', 'L2_LINES_IN_ALL', 'L2_LINES_OUT_NON_SILENT',
-    'L2_LINES_OUT_SILENT', 'L2_RQSTS_SWPF_HIT', 'L2_RQSTS_SWPF_MISS', 'SW_PREFETCH_ACCESS_T0', 'SW_PREFETCH_ACCESS_T1_T2','core0_int','core1_int','cycles','instructions','IPC']
+    'L2_LINES_OUT_SILENT', 'L2_RQSTS_SWPF_HIT', 'L2_RQSTS_SWPF_MISS', 'SW_PREFETCH_ACCESS_T0', 'SW_PREFETCH_ACCESS_T1_T2','core0_int','core1_int','cycles','instructions','IPC','Warm_count','Cold_count']
 write_row_to_file(CACHE_FILENAME, header)
 
 # header = ["MODE", 'tx_pkts', 'rx_pkts', 'loss %', 'curr_t', 'rx_dropped', 'rx_invalid', 'rx_queue_full',
@@ -425,5 +428,5 @@ for i in range(len(app_type)):
     ['taskset', '-c', '0', 'sudo', APP_PATH, '-i', IFNAME, '-U','16384','-s','512','-B','-A',str(app_type[i]),'-W'],
 
     ]
-    run_all(experiments,65, 512, 30000, pktgen)
+    run_all(experiments,40, 512, 30000, pktgen)
 
