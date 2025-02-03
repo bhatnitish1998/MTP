@@ -145,15 +145,6 @@ static int multiplier = 4096;
 static int opt_packet_size = 512;
 
 static bool opt_complete_umem;
-//////////// Cache time related /////////////////
-uint64_t start, end;
-unsigned int dummy;
-
-#define MAX_MEMTIME_COUNT 100000
-static int opt_debug_memtime = false;
-uint64_t access_time[MAX_MEMTIME_COUNT];
-static int memtime_count =0;
-
 
 ////////////// Packet related variables //////////////
 
@@ -177,17 +168,13 @@ struct addr_info{
 static int to_add =-1;
 u64 prev_consumer =0;
 
-#define MAX_ADDRESS_COUNT 65536
-struct addr_info addr_array[MAX_ADDRESS_COUNT];
+#define MAX_ADDRESS_COUNT 100000
+u64 addr_array[MAX_ADDRESS_COUNT];
 static int addr_count =0;
-
-u64 address_counting [16384];
 
 static bool opt_debug_addr = false;
 static const char *addr_file = "";
 char addr_file_path[256];
-static const char *mem_time_file = "";
-char mem_time_file_path[256];
 ///////////////// Software Prefetching //////////////
 
 static bool opt_spf = false;
@@ -491,22 +478,7 @@ static void  debug_addresses()
 		}
 		for(u32 i = 0; i < addr_count; i++)
 		{
-			fprintf(file, "number:%u	address:%llu	length:%u   count: %llu access_time: %lu\n",addr_array[i].number,
-					addr_array[i].addr/opt_xsk_frame_size,addr_array[i].len,address_counting[addr_array[i].addr/opt_xsk_frame_size],access_time[i]);
-		}
-
-		fclose(file);
-}
-
-static void debug_memory_access_time()
-{
-		FILE *file = fopen(mem_time_file_path, "a");
-		if (file == NULL) {
-			perror("Error opening file");
-		}
-		for(u32 i = 0; i < memtime_count; i++)
-		{
-			fprintf(file,"%lu\n",access_time[i]);
+			fprintf(file,"%llu\n",addr_array[i]/opt_xsk_frame_size);
 		}
 
 		fclose(file);
@@ -535,9 +507,6 @@ void post_exp_process()
 
 	if(opt_debug_addr)
 		debug_addresses();
-
-	if(opt_debug_memtime)
-		debug_memory_access_time();
 
 }
 
@@ -765,7 +734,6 @@ static struct option long_options[] = {
 	{"debug-addr", required_argument, 0, 'D'},
 	{"dynamic-ring", no_argument, 0, 'R'},
 	{"app-type", required_argument, 0, 'A'},
-	{"debug-memtime", required_argument, 0, 'T'},
 	{0, 0, 0, 0}
 };
 
@@ -802,7 +770,6 @@ static void usage(const char *prog)
 		"  -D, --debug-addr=file	Write addresses to file \n"
 		"  -R, --dynamic-ring	Dynamically change ring size \n"
 		"  -A, --app-type=type	Application type(0,1,2,3,4,5) \n"
-		"  -T, --debug-memtime=file	Write access times to file \n"
 		"\n";
 	fprintf(stderr, str, prog, opt_xsk_frame_size,
 		opt_batch_size,SCHED_PRI__DEFAULT);
@@ -818,7 +785,7 @@ static void parse_command_line(int argc, char **argv)
 
 	for (;;) {
 		c = getopt_long(argc, argv,
-				"i:q:pSNn:w:O:czf:muMd:b:BU:hWs:CPD:RA:T:",
+				"i:q:pSNn:w:O:czf:muMd:b:BU:hWs:CPD:RA:",
 				long_options, &option_index);
 		if (c == -1)
 			break;
@@ -932,11 +899,6 @@ static void parse_command_line(int argc, char **argv)
 			else if(opt_application_type == 5)
 				printf("MAC swap and forward\n");
 
-			break;
-
-		case 'T':
-			opt_debug_memtime =1;
-			mem_time_file = optarg;
 			break;
 		default:
 			usage(basename(argv[0]));
@@ -1082,17 +1044,7 @@ static void forward(struct xsk_socket_info *xsk)
 		char *pkt = xsk_umem__get_data(xsk->umem->buffer, addr);
 
 		if (!nb_frags++){
-			// start = __rdtscp(&dummy);  
-			__asm__ __volatile__("lfence");   
-			start = __rdtsc();   
 			process_packet(pkt,len,addr);
-			__asm__ __volatile__("lfence");
-			end = __rdtsc();  
-			// end = __rdtscp(&dummy);
-
-			if(opt_debug_memtime && memtime_count < MAX_MEMTIME_COUNT -1){
-				access_time[memtime_count++] = end - start; 
-			}
 
 		}
 
@@ -1103,10 +1055,7 @@ static void forward(struct xsk_socket_info *xsk)
 		tx_desc->len = len;
 
 		if(opt_debug_addr && addr_count < MAX_ADDRESS_COUNT-1){
-			addr_array[addr_count].number = i;
-			addr_array[addr_count].addr = addr;
-			addr_array[addr_count].len = len;
-			address_counting[addr/opt_xsk_frame_size]++;
+			addr_array[addr_count] = addr;
 			addr_count++;
 		}
 
@@ -1185,25 +1134,13 @@ static void receive(struct xsk_socket_info *xsk)
 	}
 
 		if (!nb_frags++){
-			// start = __rdtscp(&dummy);     
-			__asm__ __volatile__("lfence");
-			start = __rdtsc();   
 			process_packet(pkt,len,addr);
-			__asm__ __volatile__("lfence");
-			end = __rdtsc();  
-			// end = __rdtscp(&dummy);
-
-			if(opt_debug_memtime && memtime_count < MAX_MEMTIME_COUNT -1){
-				access_time[memtime_count++] = end - start; 
-			}
 		}
 
 
 		if(opt_debug_addr && addr_count < MAX_ADDRESS_COUNT-1){
-			addr_array[addr_count].number = i;
-			addr_array[addr_count].addr = addr;
-			addr_array[addr_count].len = len;
-			address_counting[addr/opt_xsk_frame_size]++;
+
+			addr_array[addr_count]= addr;
 			addr_count++;
 		}
 
@@ -1450,16 +1387,6 @@ int main(int argc, char **argv)
 		fclose(file);
 	}
 
-
-	if(opt_debug_memtime)
-	{
-		snprintf(mem_time_file_path, sizeof(mem_time_file_path), "./logs/%s", mem_time_file);
-		FILE *file = fopen(mem_time_file_path, "w");
-		if (file == NULL) {
-			perror("Error opening file");
-		}
-		fclose(file);
-	}
 
 	/* Reserve memory for the umem. Use hugepages if unaligned chunk mode */
 	bufs = mmap(NULL, umem_size * opt_xsk_frame_size,
