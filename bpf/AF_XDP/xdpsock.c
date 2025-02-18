@@ -1214,6 +1214,7 @@ static void receive(struct xsk_socket_info *xsk)
 	xsk->ring_stats.rx_npkts += eop_cnt;
 	xsk->ring_stats.rx_frags += rcvd;
 
+
 	if( prev_cons != *xsk->umem->fq.consumer)
 	{
 		int cons_move = *xsk->umem->fq.consumer - prev_cons;
@@ -1221,11 +1222,20 @@ static void receive(struct xsk_socket_info *xsk)
 		prev_cons = *xsk->umem->fq.consumer; 
 		prev_prod = *xsk->umem->fq.producer;
 
-		if(cons_move > prod_move)
-			cold_count += cons_move - prod_move;
+		if(cons_move > prod_move + prod_extra)
+		{
+			cold_count += cons_move - (prod_move + prod_extra);
+			warm_count += prod_move + prod_extra;
+			prod_extra =0;
+		}
 
-		warm_count += prod_move;
-
+		else if( cons_move > prod_move)
+		{
+			warm_count += cons_move;
+			prod_extra -= (cons_move - prod_move);
+		}
+		else
+			warm_count = prod_move;
 	}
 }
 
