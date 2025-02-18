@@ -268,8 +268,7 @@ def run_once(exp_cmd, curr_t, pkt_size, duration, pktgen):
     pktgen.expect('cleanup-done')
     time.sleep(1)
 
-    return loss, row
-
+    return row
 
 def run_all(experiments, max_rate, pkt_size, duration, pktgen):
     for x in experiments:
