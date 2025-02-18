@@ -1116,8 +1116,12 @@ static void forward(struct xsk_socket_info *xsk)
 			warm_count += cons_move;
 			prod_extra -= (cons_move - prod_move);
 		}
-		else
-			warm_count = prod_move;
+
+		else	
+		{
+			warm_count += cons_move;
+			prod_extra += (prod_move-cons_move);
+		}
 	}
 	
 }
@@ -1234,8 +1238,12 @@ static void receive(struct xsk_socket_info *xsk)
 			warm_count += cons_move;
 			prod_extra -= (cons_move - prod_move);
 		}
-		else
-			warm_count = prod_move;
+
+		else	
+		{
+			warm_count += cons_move;
+			prod_extra += (prod_move-cons_move);
+		}
 	}
 }
 
