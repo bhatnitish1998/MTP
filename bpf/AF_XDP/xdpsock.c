@@ -163,6 +163,7 @@ static long long warm_count;
 static long long cold_count;
 static long long prev_prod = 16384;
 static long long prev_cons = 0;
+static long long prod_extra = 0;
 struct addr_info{
 	u32 number;
 	u64 addr;
@@ -1103,14 +1104,22 @@ static void forward(struct xsk_socket_info *xsk)
 		prev_cons = *xsk->umem->fq.consumer; 
 		prev_prod = *xsk->umem->fq.producer;
 
-		if(cons_move > prod_move)
-			cold_count += cons_move - prod_move;
+		if(cons_move > prod_move + prod_extra)
+		{
+			cold_count += cons_move - (prod_move + prod_extra);
+			warm_count += prod_move + prod_extra;
+			prod_extra =0;
+		}
 
-		warm_count += prod_move;
-
+		else if( cons_move > prod_move)
+		{
+			warm_count += cons_move;
+			prod_extra -= (cons_move - prod_move);
+		}
+		else
+			warm_count = prod_move;
 	}
 	
-
 }
 
 static void receive(struct xsk_socket_info *xsk)
