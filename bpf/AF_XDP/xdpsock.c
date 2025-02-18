@@ -159,9 +159,10 @@ static int pkt_count=0;
 /////////////// Warm buffers & addresses  ////////////
 static bool opt_warm_buffers = false;
 
-static bool warm_bit [16384];
 static long long warm_count;
 static long long cold_count;
+static long long prev_prod = 16384;
+static long long prev_cons = 0;
 struct addr_info{
 	u32 number;
 	u64 addr;
@@ -171,7 +172,7 @@ struct addr_info{
 static int to_add =-1;
 u64 prev_consumer =0;
 
-#define MAX_ADDRESS_COUNT 65536
+#define MAX_ADDRESS_COUNT 16384
 struct addr_info addr_array[MAX_ADDRESS_COUNT];
 static int addr_count =0;
 
@@ -1000,12 +1001,8 @@ static inline void complete_tx_forward(struct xsk_socket_info *xsk)
 		{
 			u64 orig = *xsk_ring_cons__comp_addr(&umem->cq, idx_cq++);
 
-			if(opt_warm_buffers){
-				u64 oldval = custom_xsk_ring_prod__fill_addr(&umem->fq,idx_fq++,orig,(to_add+i));
-				warm_bit[orig/opt_xsk_frame_size] = true;
-				warm_bit[oldval/opt_xsk_frame_size] = false;
-
-			}
+			if(opt_warm_buffers)
+				custom_xsk_ring_prod__fill_addr(&umem->fq,idx_fq++,orig,(to_add+i));
 			else
 				*xsk_ring_prod__fill_addr(&umem->fq, idx_fq++) = orig;
 		}
@@ -1058,13 +1055,6 @@ static void forward(struct xsk_socket_info *xsk)
 		u32 len = desc->len;
 		u64 orig = xsk_umem__extract_addr(addr);
 
-		if(warm_bit[addr/opt_xsk_frame_size]== true)
-			warm_count++;
-		else
-			cold_count++;
-
-		warm_bit[addr/opt_xsk_frame_size] = false;
-
 		addr = xsk_umem__add_offset_to_addr(addr);
 		char *pkt = xsk_umem__get_data(xsk->umem->buffer, addr);
 
@@ -1104,6 +1094,23 @@ static void forward(struct xsk_socket_info *xsk)
 	xsk->ring_stats.rx_frags += rcvd;
 	xsk->ring_stats.tx_frags += rcvd;
 	xsk->outstanding_tx += frags_done;
+
+
+	if( prev_cons != *xsk->umem->fq.consumer)
+	{
+		int cons_move = *xsk->umem->fq.consumer - prev_cons;
+		int prod_move = *xsk->umem->fq.producer - prev_prod;
+		prev_cons = *xsk->umem->fq.consumer; 
+		prev_prod = *xsk->umem->fq.producer;
+
+		if(cons_move > prod_move)
+			cold_count += cons_move - prod_move;
+
+		warm_count += prod_move;
+
+	}
+	
+
 }
 
 static void receive(struct xsk_socket_info *xsk)
@@ -1152,13 +1159,6 @@ static void receive(struct xsk_socket_info *xsk)
 		u32 len = desc->len;
 		u64 orig = xsk_umem__extract_addr(addr);
 
-		if(warm_bit[addr/opt_xsk_frame_size]== true)
-			warm_count++;
-		else
-			cold_count++;
-
-		warm_bit[addr/opt_xsk_frame_size] = false;
-
 
 		addr = xsk_umem__add_offset_to_addr(addr);
 		char *pkt = xsk_umem__get_data(xsk->umem->buffer, addr);
@@ -1191,10 +1191,7 @@ static void receive(struct xsk_socket_info *xsk)
 		}
 
 		if(opt_warm_buffers)
-		{	u64 oldval = custom_xsk_ring_prod__fill_addr(&xsk->umem->fq, idx_fq++,orig,(to_add + i));
-			warm_bit[orig/opt_xsk_frame_size] = true;
-			warm_bit[oldval/opt_xsk_frame_size] = false;
-		}
+			custom_xsk_ring_prod__fill_addr(&xsk->umem->fq, idx_fq++,orig,(to_add + i));
 		else
 			*xsk_ring_prod__fill_addr(&xsk->umem->fq, idx_fq++) = orig;
 	}
@@ -1207,6 +1204,20 @@ static void receive(struct xsk_socket_info *xsk)
 
 	xsk->ring_stats.rx_npkts += eop_cnt;
 	xsk->ring_stats.rx_frags += rcvd;
+
+	if( prev_cons != *xsk->umem->fq.consumer)
+	{
+		int cons_move = *xsk->umem->fq.consumer - prev_cons;
+		int prod_move = *xsk->umem->fq.producer - prev_prod;
+		prev_cons = *xsk->umem->fq.consumer; 
+		prev_prod = *xsk->umem->fq.producer;
+
+		if(cons_move > prod_move)
+			cold_count += cons_move - prod_move;
+
+		warm_count += prod_move;
+
+	}
 }
 
 static void receive_all(void)
