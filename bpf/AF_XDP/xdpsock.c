@@ -53,6 +53,71 @@ Application types
 #include "xdpsock.h"
 #include <sys/stat.h>
 #include <x86intrin.h>
+//////////////////////////////////////////////////////
+#define TABLE_SIZE 1000
+#define EMPTY_KEY -1
+
+// Define structure for hash table entries
+typedef struct {
+    int key;
+    int value;
+    bool occupied;
+} Entry;
+
+// Define structure for hash table
+typedef struct {
+    Entry table[TABLE_SIZE];
+} HashMap;
+
+
+#include <stdio.h>
+#include <stdlib.h>
+
+// Hash function (FNV-1a hash)
+unsigned int hash(int key) {
+    return key % TABLE_SIZE;
+}
+
+// Initialize the hash table
+void initHashMap(HashMap *map) {
+    for (int i = 0; i < TABLE_SIZE; i++) {
+        map->table[i].occupied = false;
+        map->table[i].key = EMPTY_KEY;
+    }
+}
+
+// Insert key-value pair into the hash table using linear probing
+void insert_key(HashMap *map, int key, int value) {
+    unsigned int index = hash(key);
+    while (map->table[index].occupied) {
+        if (map->table[index].key == key) {
+            map->table[index].value = value; // Update existing key
+            return;
+        }
+        index = (index + 1) % TABLE_SIZE; // Linear probing
+    }
+    map->table[index].key = key;
+    map->table[index].value = value;
+    map->table[index].occupied = true;
+}
+
+// Search for a key in the hash table
+int search_key(HashMap *map, int key, int *value) {
+    unsigned int index = hash(key);
+    while (map->table[index].occupied) {
+        if (map->table[index].key == key) {
+            *value = map->table[index].value;
+            return 1;
+        }
+        index = (index + 1) % TABLE_SIZE; // Linear probing
+    }
+    return 0;
+}
+
+
+/////////////////////////////////////////////////////
+
+
 
 #include "../lib/xdp-tools/headers/xdp/xsk.h"
 
@@ -124,6 +189,9 @@ static bool load_xdp_prog;
 ////////////// Application type variables ////////////////
 int opt_application_type = 0;
 
+int random_nums[1000];
+int random_index =0;
+HashMap map;
 ///////////// Configuration variables ////////////////
 
 // queue sizes: Changing umem sizes changes their size accordingly -U
@@ -607,8 +675,25 @@ static void inline process_packet(void *data, size_t length, u64 addr)
 		}
 
 	}
+
 	if(opt_application_type == 3 ){
-		dummy_primes+=get_prime_count(100);
+	unsigned char *pkt = (unsigned char *)data;
+	for(int i =0; i<length;i+=64)
+		{
+			
+			if(pkt[i]=='a')
+			dummy_count++;
+
+
+			int value;
+			random_index = (random_index+1) %1000;
+	
+			if (search_key(&map, random_nums[random_index], &value)) {
+				dummy_count+=value;
+			} else {
+				dummy_count++;
+			}
+		}
 	}
 
 	if (opt_application_type == 4)
@@ -1440,6 +1525,21 @@ int main(int argc, char **argv)
 
 	if (load_xdp_prog)
 		load_xdp_program();
+
+
+	srand(614);
+    initHashMap(&map);
+
+	for(int i =1; i< TABLE_SIZE-1; i++)
+	{
+		int value = rand();
+		insert_key(&map, i,value);
+	}
+
+	for(int i =0; i<1000; i++)
+	{
+		random_nums[i] = rand() % (TABLE_SIZE);
+	}
 
 	if(opt_unaligned_chunks){
 		multiplier = opt_packet_size;
