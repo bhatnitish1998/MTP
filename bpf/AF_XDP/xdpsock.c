@@ -6,8 +6,8 @@ Application types
 0 = MAC swap and drop 
 1 = Read every cache line
 2 = Write every cache line
-3 = Huge calculation (Compute prime numbers)
-4 = Some packets take more time (say every 10000 thpacket)
+3 = Huge calculation (Hashmap)
+4 = memcached application
 5 = MAC swap and forward
 */
 
@@ -53,6 +53,12 @@ Application types
 #include "xdpsock.h"
 #include <sys/stat.h>
 #include <x86intrin.h>
+#include <stdio.h>
+#include <stdlib.h>
+
+
+#include "../lib/xdp-tools/headers/xdp/xsk.h"
+
 //////////////////////////////////////////////////////
 #define TABLE_SIZE 1000
 #define EMPTY_KEY -1
@@ -69,9 +75,6 @@ typedef struct {
     Entry table[TABLE_SIZE];
 } HashMap;
 
-
-#include <stdio.h>
-#include <stdlib.h>
 
 // Hash function (FNV-1a hash)
 unsigned int hash(int key) {
@@ -117,9 +120,6 @@ int search_key(HashMap *map, int key, int *value) {
 
 /////////////////////////////////////////////////////
 
-
-
-#include "../lib/xdp-tools/headers/xdp/xsk.h"
 
 #ifndef SOL_XDP
 #define SOL_XDP 283
@@ -256,7 +256,6 @@ static bool opt_spf = false;
 
 /////////////// Dynamic ring ///////////////
 
-static bool opt_dynamic_ring = false;
 
 struct sigevent sev_monitor;
 timer_t timerid_monitor;
@@ -349,31 +348,6 @@ static int num_socks;
 struct xsk_socket_info *xsks[MAX_SOCKS];
 int sock;
 
-////////////// Processing time functions /////////////
-
-static bool inline  is_prime(long long num) {
-    if (num <= 1) return false;
-    if (num == 2 || num == 3) return true;
-    if (num % 2 == 0 || num % 3 == 0) return false;
-
-    for (long long i = 5; i <= num/2; i += 6) {
-        if (num % i == 0 || num % (i + 2) == 0) return false;
-    }
-    return true;
-}
-
-static int inline get_prime_count(long long limit){
-
-	int counts=0;
-	for(long long i=1; i<limit;i++)
-	{
-		if(is_prime(i))
-			counts++;
-	}
-
-	return counts;
-}
-
 ////////////////////////////////////////////////////////
 
 static void inline prefetch_packet(void* addr)
@@ -392,110 +366,6 @@ static void inline prefetch_packet(void* addr)
 	}
 }
 
-////////////////// Dynamic ring size ////////////////////////////////////
-
-// fills in received and dropped packets in passed array.
-static inline void get_pkt_stats_since_last(long long arr[2])
-{
-	FILE *fp;
-	char line[512];
-	char iface[64];
-
-	long long rcvd_pkts = 0;
-	long long dropped_pkts = 0;
-
-	// Open /proc/net/dev
-	fp = fopen("/proc/net/dev", "r");
-	if (fp == NULL)
-		perror("Failed to open /proc/net/dev");
-
-	// Skip the first two header lines
-	if(fgets(line, sizeof(line), fp)==NULL)
-		perror("Could not read proc file");
-	if(fgets(line, sizeof(line), fp)==NULL)
-		perror("Could not read proc file");
-
-	// Read each line and check for the desired interface
-	while (fgets(line, sizeof(line), fp) != NULL)
-	{
-		sscanf(line, "%63[^:]", iface); // Extract the interface name
-		if (strcmp(iface, interface) == 0)
-		{
-			// Tokenize the string
-			char *token = strtok(line, " ");
-			int column = 1;
-
-			// Get column 3 and 5
-			while (token != NULL)
-			{
-				if (column == 3)
-					rcvd_pkts = strtoll(token, NULL, 10);
-
-				if (column == 5)
-				{
-					dropped_pkts = strtoll(token, NULL, 10);
-					break;
-				}
-				column++;
-				token = strtok(NULL, " ");
-			}
-			break;
-		}
-	}
-
-	long long dropped = dropped_pkts - prev_drop;
-	long long received = rcvd_pkts - prev_rcvd;
-	arr[0] = received;
-	arr[1] = dropped;
-	prev_drop=dropped_pkts;
-	prev_rcvd = rcvd_pkts;
-	fclose(fp);
-}
-
-static inline long long get_warm_buffers_since_last()
-{
-	long long diff =0;
-	struct xsk_socket_info *xsk = xsks[0];
-	u32 current_producer = *xsk->umem->fq.producer;
-	if(current_producer >= prev_producer)
-		diff = current_producer - prev_producer;
-	else
-		diff = prev_diff;
-	
-	prev_diff = diff;
-	prev_producer = current_producer;
-	return diff;
-	
-}
-
-static inline void create_timer()
-{
-	// Create timer
-	sev_monitor.sigev_notify = SIGEV_SIGNAL;
-	sev_monitor.sigev_signo = SIGALRM;
-	sev_monitor.sigev_value.sival_ptr = &timerid_monitor;
-	if (timer_create(CLOCK_REALTIME, &sev_monitor, &timerid_monitor) == -1)
-		perror("timer create");
-}
-
-static inline void start_timer()
-{
-	// start timer with interval of 1 sec
-	its_monitor.it_value.tv_sec = monitor_secs;
-	its_monitor.it_value.tv_nsec = monitor_nsecs;
-	its_monitor.it_interval.tv_sec = monitor_secs;
-	its_monitor.it_interval.tv_nsec = monitor_nsecs;
-	if (timer_settime(timerid_monitor, 0, &its_monitor, NULL) == -1)
-		perror("timer_settime");
-}
-
-static void timer_handler(int sig)
-{
-	long long stats[2];
-	get_pkt_stats_since_last(stats);
-	long long warm_buffers = get_warm_buffers_since_last();
-	printf("Received:%lld Dropped:%lld Warm:%lld\n",stats[0],stats[1],warm_buffers);
-}
 
 //////////////////////////////////////////////////////
 static int get_clockid(clockid_t *id, const char *name)
@@ -696,14 +566,6 @@ static void inline process_packet(void *data, size_t length, u64 addr)
 		}
 	}
 
-	if (opt_application_type == 4)
-	{
-		if(pkt_count >10000)
-		{
-			pkt_count = 0;
-			dummy_primes+=get_prime_count(100);
-		}
-	}
 }
 
 
@@ -833,7 +695,6 @@ static struct option long_options[] = {
 	{"Complete-umem", no_argument, 0, 'C'},
 	{"soft-pf", no_argument, 0, 'P'},
 	{"debug-addr", required_argument, 0, 'D'},
-	{"dynamic-ring", no_argument, 0, 'R'},
 	{"app-type", required_argument, 0, 'A'},
 	{0, 0, 0, 0}
 };
@@ -869,7 +730,6 @@ static void usage(const char *prog)
 		"  -C, --Complete-umem   Use entire umem in unaligned mode. Extend fill queue as needed\n"
 		"  -P, --soft-pf   Software prefetch next buffers \n"
 		"  -D, --debug-addr=file	Write addresses to file \n"
-		"  -R, --dynamic-ring	Dynamically change ring size \n"
 		"  -A, --app-type=type	Application type(0,1,2,3,4,5) \n"
 		"\n";
 	fprintf(stderr, str, prog, opt_xsk_frame_size,
@@ -886,7 +746,7 @@ static void parse_command_line(int argc, char **argv)
 
 	for (;;) {
 		c = getopt_long(argc, argv,
-				"i:q:pSNn:w:O:czf:muMd:b:BU:hWs:CPD:RA:",
+				"i:q:pSNn:w:O:czf:muMd:b:BU:hWs:CPD:A:",
 				long_options, &option_index);
 		if (c == -1)
 			break;
@@ -981,9 +841,6 @@ static void parse_command_line(int argc, char **argv)
 		case 'D':
 			opt_debug_addr =1;
 			addr_file = optarg;
-			break;
-		case 'R':
-			opt_dynamic_ring =1;
 			break;
 		case 'A':
 			opt_application_type = atoi(optarg);
@@ -1601,14 +1458,6 @@ int main(int argc, char **argv)
 	signal(SIGINT, int_exit);
 	signal(SIGTERM, int_exit);
 	signal(SIGABRT, int_exit);
-
-	if(opt_dynamic_ring){
-
-		// timer 
-		signal(SIGALRM, timer_handler);
-		create_timer();
-		start_timer();
-	}
 
 	setlocale(LC_ALL, "");
 
