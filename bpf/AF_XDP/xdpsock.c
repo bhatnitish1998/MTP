@@ -6,8 +6,8 @@ Application types
 0 = MAC swap and drop 
 1 = Read every cache line
 2 = Write every cache line
-3 = Huge calculation (Hashmap)
-4 = memcached application
+3 = Hashmap
+4 = mica keyvalue store
 5 = MAC swap and forward
 */
 
@@ -19,7 +19,6 @@ Application types
 #include <linux/if_link.h>
 #include <linux/if_xdp.h>
 #include <linux/if_ether.h>
-#include <linux/ip.h>
 #include <linux/limits.h>
 #include <linux/udp.h>
 #include <arpa/inet.h>
@@ -53,72 +52,15 @@ Application types
 #include "xdpsock.h"
 #include <sys/stat.h>
 #include <x86intrin.h>
-#include <stdio.h>
-#include <stdlib.h>
-
+#include <netinet/ip.h> 
 
 #include "../lib/xdp-tools/headers/xdp/xsk.h"
 
-//////////////////////////////////////////////////////
-#define TABLE_SIZE 1000
-#define EMPTY_KEY -1
+#include "hashmap.h"
 
-// Define structure for hash table entries
-typedef struct {
-    int key;
-    int value;
-    bool occupied;
-} Entry;
-
-// Define structure for hash table
-typedef struct {
-    Entry table[TABLE_SIZE];
-} HashMap;
-
-
-// Hash function (FNV-1a hash)
-unsigned int hash(int key) {
-    return key % TABLE_SIZE;
-}
-
-// Initialize the hash table
-void initHashMap(HashMap *map) {
-    for (int i = 0; i < TABLE_SIZE; i++) {
-        map->table[i].occupied = false;
-        map->table[i].key = EMPTY_KEY;
-    }
-}
-
-// Insert key-value pair into the hash table using linear probing
-void insert_key(HashMap *map, int key, int value) {
-    unsigned int index = hash(key);
-    while (map->table[index].occupied) {
-        if (map->table[index].key == key) {
-            map->table[index].value = value; // Update existing key
-            return;
-        }
-        index = (index + 1) % TABLE_SIZE; // Linear probing
-    }
-    map->table[index].key = key;
-    map->table[index].value = value;
-    map->table[index].occupied = true;
-}
-
-// Search for a key in the hash table
-int search_key(HashMap *map, int key, int *value) {
-    unsigned int index = hash(key);
-    while (map->table[index].occupied) {
-        if (map->table[index].key == key) {
-            *value = map->table[index].value;
-            return 1;
-        }
-        index = (index + 1) % TABLE_SIZE; // Linear probing
-    }
-    return 0;
-}
-
-
-/////////////////////////////////////////////////////
+#include <assert.h>
+#include "./ported-mica/hash.h"
+#include "./ported-mica/mehcached.h"
 
 
 #ifndef SOL_XDP
@@ -159,7 +101,6 @@ typedef __u8  u8;
 
 static unsigned long prev_time;
 
-
 static enum xdp_attach_mode opt_attach_mode = XDP_MODE_NATIVE;
 static const char *opt_if = "";
 static int opt_ifindex;
@@ -189,9 +130,22 @@ static bool load_xdp_prog;
 ////////////// Application type variables ////////////////
 int opt_application_type = 0;
 
-int random_nums[1000];
-int random_index =0;
+struct mehcached_table table_o;
+struct mehcached_table *table;
+
+#define NUM_KEYS 2000
+#define VALUE_SIZE 256
+size_t default_keys [NUM_KEYS];
+int keys_index = 0;
+char default_value [VALUE_SIZE];
+
+long long found =0;
+long long not_found= 0;
+
 HashMap map;
+
+int random_nums[NUM_KEYS];
+int random_index;
 ///////////// Configuration variables ////////////////
 
 // queue sizes: Changing umem sizes changes their size accordingly -U
@@ -271,8 +225,6 @@ long long prev_rcvd;
 long long prev_diff;
 
 const char *interface = "ens19f0np0";
-
-/////////////////////////////////////
 
 struct xsk_ring_stats {
 	unsigned long rx_frags;
@@ -448,6 +400,8 @@ void post_exp_process()
 			// Warm buffer count
 			fprintf(file, "warm_count,%lld\n",warm_count);
 			fprintf(file, "cold_count,%lld\n",cold_count);
+			fprintf(file, "found,%lld\n",found);
+			fprintf(file, "not_found,%lld\n",not_found);
 			// Write dummy count to avoid compiler optimization
 			fprintf(file, "dummy_count,%d\n",dummy_count);
 			fprintf(file, "dummy_primes,%d\n",dummy_primes);
@@ -457,6 +411,13 @@ void post_exp_process()
 
 	if(opt_debug_addr)
 		debug_addresses();
+
+	if(opt_application_type == 4)
+	{
+		mehcached_table_free(table);
+	}
+		
+	
 }
 
 static void remove_xdp_program(void)
@@ -564,6 +525,99 @@ static void inline process_packet(void *data, size_t length, u64 addr)
 				dummy_count++;
 			}
 		}
+	}
+
+	if(opt_application_type ==4)
+	{
+		 // Check for Ethernet header
+		 if (length < (int)sizeof(struct ether_header)) {
+			fprintf(stderr, "Packet too short for Ethernet header!\n");
+			exit(EXIT_FAILURE);
+		}
+		struct ether_header *eth = (struct ether_header *)data;
+		if (ntohs(eth->ether_type) != ETHERTYPE_IP) {
+			fprintf(stderr, "Not an IP packet\n");
+			exit(EXIT_FAILURE);
+		}
+	
+		// Move pointer to IP header
+		char *ip_ptr = data + sizeof(struct ether_header);
+		int ip_len = length - sizeof(struct ether_header);
+		if (ip_len < (int)sizeof(struct ip)) {
+			fprintf(stderr, "Packet too short for IP header!\n");
+			exit(EXIT_FAILURE);
+		}
+		struct ip *ip_hdr = (struct ip *)ip_ptr;
+		int ip_header_length = ip_hdr->ip_hl * 4;  // ip_hl is in 32-bit words
+		if (ip_len < ip_header_length) {
+			fprintf(stderr, "Incomplete IP header!\n");
+			exit(EXIT_FAILURE);
+		}
+	
+		// Verify that this is a UDP packet
+		if (ip_hdr->ip_p != IPPROTO_UDP) {
+			fprintf(stderr, "Not a UDP packet\n");
+			exit(EXIT_FAILURE);
+		}
+	
+		// Move pointer to UDP header
+		char *udp_ptr = ip_ptr + ip_header_length;
+		int udp_len = ip_len - ip_header_length;
+		if (udp_len < (int)sizeof(struct udphdr)) {
+			fprintf(stderr, "Packet too short for UDP header!\n");
+			exit(EXIT_FAILURE);
+		}
+	
+		// Compute pointer to our payload (after UDP header)
+		char *payload = udp_ptr + sizeof(struct udphdr);
+		int payload_len = udp_len - sizeof(struct udphdr);
+	
+		// Ensure payload has enough data for operation, key, and value
+		if (payload_len < sizeof(size_t) * 2 + 256) {
+			fprintf(stderr, "Payload too short for operation, key, and value fields!\n");
+			exit(EXIT_FAILURE);
+		}
+		
+		size_t operation, key;
+		char value[256];
+		
+		memcpy(&operation, payload, sizeof(size_t));
+		memcpy(&key, payload + sizeof(size_t), sizeof(size_t));
+
+		operation = 0;
+		key = default_keys[keys_index];
+		keys_index = (keys_index+1) % NUM_KEYS;
+
+		// get operation
+		if( operation == 0)
+		{
+			uint64_t key_hash = hash((const uint8_t *)&key, sizeof(key));
+	
+			size_t value_length = sizeof(value);
+
+			if (!mehcached_get(0, table, key_hash, (const uint8_t *)&key, sizeof(key), (uint8_t *)&value, &value_length, NULL, false))
+			{
+				not_found++;
+			}
+			else{
+			found++;
+			assert(value_length == sizeof(value));
+			}
+
+			// TODO: Create a packet and send the value back.
+		}
+		
+		// store operation
+		if( operation ==1 )
+		{
+
+			memcpy(value, payload + sizeof(size_t) * 2, 256);
+			value[255] = '\0';
+			uint64_t key_hash = hash((const uint8_t *)&key, sizeof(key));
+			if (!mehcached_set(0, table, key_hash, (const uint8_t *)&key, sizeof(key), (const uint8_t *)&value, sizeof(value), 0, true))
+				assert(false);
+		}
+
 	}
 
 }
@@ -851,9 +905,9 @@ static void parse_command_line(int argc, char **argv)
 			else if(opt_application_type == 2)
 				printf("Write every cache line\n");
 			else if(opt_application_type == 3)
-				printf("Huge computation\n");
+				printf("Hashmap\n");
 			else if(opt_application_type == 4)
-				printf("Some packets take time\n");
+				printf("MICA\n");
 			else if(opt_application_type == 5)
 				printf("MAC swap and forward\n");
 
@@ -1039,32 +1093,32 @@ static void forward(struct xsk_socket_info *xsk)
 	xsk->outstanding_tx += frags_done;
 
 
-	if( prev_cons != *xsk->umem->fq.consumer)
-	{
-		int cons_move = *xsk->umem->fq.consumer - prev_cons;
-		int prod_move = *xsk->umem->fq.producer - prev_prod;
-		prev_cons = *xsk->umem->fq.consumer; 
-		prev_prod = *xsk->umem->fq.producer;
+	// if( prev_cons != *xsk->umem->fq.consumer)
+	// {
+	// 	int cons_move = *xsk->umem->fq.consumer - prev_cons;
+	// 	int prod_move = *xsk->umem->fq.producer - prev_prod;
+	// 	prev_cons = *xsk->umem->fq.consumer; 
+	// 	prev_prod = *xsk->umem->fq.producer;
 
-		if(cons_move > prod_move + prod_extra)
-		{
-			cold_count += cons_move - (prod_move + prod_extra);
-			warm_count += prod_move + prod_extra;
-			prod_extra =0;
-		}
+	// 	if(cons_move > prod_move + prod_extra)
+	// 	{
+	// 		cold_count += cons_move - (prod_move + prod_extra);
+	// 		warm_count += prod_move + prod_extra;
+	// 		prod_extra =0;
+	// 	}
 
-		else if( cons_move > prod_move)
-		{
-			warm_count += cons_move;
-			prod_extra -= (cons_move - prod_move);
-		}
+	// 	else if( cons_move > prod_move)
+	// 	{
+	// 		warm_count += cons_move;
+	// 		prod_extra -= (cons_move - prod_move);
+	// 	}
 
-		else	
-		{
-			warm_count += cons_move;
-			prod_extra += (prod_move-cons_move);
-		}
-	}
+	// 	else	
+	// 	{
+	// 		warm_count += cons_move;
+	// 		prod_extra += (prod_move-cons_move);
+	// 	}
+	// }
 	
 }
 
@@ -1161,32 +1215,32 @@ static void receive(struct xsk_socket_info *xsk)
 	xsk->ring_stats.rx_frags += rcvd;
 
 
-	if( prev_cons != *xsk->umem->fq.consumer)
-	{
-		int cons_move = *xsk->umem->fq.consumer - prev_cons;
-		int prod_move = *xsk->umem->fq.producer - prev_prod;
-		prev_cons = *xsk->umem->fq.consumer; 
-		prev_prod = *xsk->umem->fq.producer;
+	// if( prev_cons != *xsk->umem->fq.consumer)
+	// {
+	// 	int cons_move = *xsk->umem->fq.consumer - prev_cons;
+	// 	int prod_move = *xsk->umem->fq.producer - prev_prod;
+	// 	prev_cons = *xsk->umem->fq.consumer; 
+	// 	prev_prod = *xsk->umem->fq.producer;
 
-		if(cons_move > prod_move + prod_extra)
-		{
-			cold_count += cons_move - (prod_move + prod_extra);
-			warm_count += prod_move + prod_extra;
-			prod_extra =0;
-		}
+	// 	if(cons_move > prod_move + prod_extra)
+	// 	{
+	// 		cold_count += cons_move - (prod_move + prod_extra);
+	// 		warm_count += prod_move + prod_extra;
+	// 		prod_extra =0;
+	// 	}
 
-		else if( cons_move > prod_move)
-		{
-			warm_count += cons_move;
-			prod_extra -= (cons_move - prod_move);
-		}
+	// 	else if( cons_move > prod_move)
+	// 	{
+	// 		warm_count += cons_move;
+	// 		prod_extra -= (cons_move - prod_move);
+	// 	}
 
-		else	
-		{
-			warm_count += cons_move;
-			prod_extra += (prod_move-cons_move);
-		}
-	}
+	// 	else	
+	// 	{
+	// 		warm_count += cons_move;
+	// 		prod_extra += (prod_move-cons_move);
+	// 	}
+	// }
 }
 
 static void receive_all(void)
@@ -1385,18 +1439,53 @@ int main(int argc, char **argv)
 
 
 	srand(614);
-    initHashMap(&map);
 
-	for(int i =1; i< TABLE_SIZE-1; i++)
-	{
-		int value = rand();
-		insert_key(&map, i,value);
+
+	if(opt_application_type ==3){
+		initHashMap(&map);
+		for(int i =1; i< TABLE_SIZE-1; i++)
+		{
+			int value = rand();
+			insert_key(&map, i,value);
+		}
+
+		for(int i =0; i<NUM_KEYS; i++)
+		{
+			random_nums[i] = rand() % (TABLE_SIZE);
+		}
 	}
 
-	for(int i =0; i<1000; i++)
+	if(opt_application_type ==4)
 	{
-		random_nums[i] = rand() % (TABLE_SIZE);
+		const size_t page_size = 1048576 * 2;
+		const size_t num_numa_nodes = 1;
+		const size_t num_pages_to_try = 16384;
+		const size_t num_pages_to_reserve = 16384 - 2048; 
+		size_t alloc_overhead = sizeof(struct mehcached_item);
+		
+		mehcached_shm_init(page_size, num_numa_nodes, num_pages_to_try, num_pages_to_reserve);
+		
+		table = &table_o;
+		size_t numa_nodes[] = {(size_t)-1};
+		// mehcached_table_init(table, 1, 1, 256, false, false, false, numa_nodes[0], numa_nodes, MEHCACHED_MTH_THRESHOLD_FIFO);
+		mehcached_table_init(table, (NUM_KEYS + MEHCACHED_ITEMS_PER_BUCKET - 1) / MEHCACHED_ITEMS_PER_BUCKET, 1, NUM_KEYS * /*MEHCACHED_ROUNDUP64*/(alloc_overhead + 8 + 8), false, false, false, numa_nodes[0], numa_nodes, MEHCACHED_MTH_THRESHOLD_FIFO);
+		assert(table);
+
+
+		memset(default_value, 'A', 255);
+    	default_value[255] = '\0'; 
+
+		for(size_t i =0; i< NUM_KEYS; i++)
+		{
+			size_t key = i; //rand();
+			default_keys [i] = key;
+
+			uint64_t key_hash = hash((const uint8_t *)&key, sizeof(key));
+			if (!mehcached_set(0, table, key_hash, (const uint8_t *)&key, sizeof(key), (const uint8_t *)&default_value, sizeof(default_value), 0, false))
+				assert(false);
+		}
 	}
+
 
 	if(opt_unaligned_chunks){
 		multiplier = opt_packet_size;
@@ -1423,7 +1512,6 @@ int main(int argc, char **argv)
 		}
 		fclose(file);
 	}
-
 
 	/* Reserve memory for the umem. Use hugepages if unaligned chunk mode */
 	bufs = mmap(NULL, umem_size * opt_xsk_frame_size,
