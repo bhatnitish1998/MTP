@@ -63,7 +63,7 @@ function setup()
 -- set configuration
     pktgen.delay(1000);
 
-    pktgen.set_mac("all", "src", "9c:69:b4:66:16:5d")
+    pktgen.set_mac("all", "src", "9c:69:b4:66:16:5c")
     pktgen.set_mac("all", "dst", "9c:69:b4:66:16:54")
     pktgen.set_ipaddr("all", "src", "192.168.201.1")
     pktgen.set_ipaddr("all", "dst", "192.168.201.5")
@@ -71,6 +71,7 @@ function setup()
     pktgen.set_type("all", "ipv4");
     pktgen.set_proto("all", "udp");
 
+    
     pktgen.delay(1000)
     printf("setup-done\n");
 end
@@ -145,15 +146,16 @@ function run(duration,mode)
     printf("run-done\n");
 end
 
-function run_burst(duration,interval_time,rate)
+function run_burst(duration,interval_time,rate,burst_count)
     duration = tonumber(duration)
     interval_time = tonumber(interval_time)
+    burst_count = tonumber(burst_count)
 
     local intervals = duration/interval_time
     local iteration = 0
 
     pktgen.set("all", "rate", rate)
-    pktgen.set("all","count",8192)
+    pktgen.set("all","count",burst_count)
     while (iteration < intervals) do
         pktgen.start("all")
         pktgen.delay(interval_time)
@@ -168,6 +170,49 @@ function run_burst(duration,interval_time,rate)
     pktgen.delay(1000)
     printf("run-done\n");
 end
+
+-- Pattern is like  normal duration  burst duration normal burst .....
+-- all duration in milliseconds
+-- duration should be multiple of (normal + burst)
+function run_mixed(duration,normal_duration,burst_duration,rate,burst_count)
+    duration = tonumber(duration)
+    normal_duration = tonumber(normal_duration)
+    burst_duration = tonumber(burst_duration)
+    burst_count = tonumber(burst_count)
+    interval_time = 1
+    local intervals = burst_duration/interval_time
+
+
+    current_duration =0
+    while(current_duration < duration) do
+       
+        pktgen.set("all", "rate", rate)
+        pktgen.start("all")
+        pktgen.delay(normal_duration)
+        pktgen.stop("all")
+        current_duration = current_duration + normal_duration
+
+
+        local iteration = 0
+        pktgen.set("all", "rate", 100)
+        pktgen.set("all","count",burst_count)
+        while (iteration < intervals) do
+            pktgen.start("all")
+            pktgen.delay(interval_time)
+            pktgen.stop("all")
+            pktgen.delay(interval_time)
+            iteration = iteration + 2
+        end
+        pktgen.set("all","count",0)
+
+        current_duration = current_duration + burst_duration
+    end 
+
+    log_stats()
+    pktgen.delay(1000)
+    printf("run-done\n");
+end
+
 
 function cleanup()
     pktgen.clear("all")
