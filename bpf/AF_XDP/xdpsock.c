@@ -163,6 +163,9 @@ char default_value [VALUE_SIZE];
 
 bool flag = false;
 
+///////////////// Throughput computation ///////////////
+struct timespec start, end;
+long long throughput_packets = 100000000;
 ///////////// Configuration variables ////////////////
 
 // queue sizes: Changing umem sizes changes their size accordingly -U
@@ -396,6 +399,15 @@ static void xdpsock_cleanup(void)
 
 void post_exp_process()
 {
+	long long diff_sec = end.tv_sec - start.tv_sec;
+    long long diff_nsec = end.tv_nsec - start.tv_nsec;
+
+	if (diff_nsec < 0) {
+        diff_sec -= 1;
+        diff_nsec += 1000000000L;
+    }
+    long long elapsed_ms = (diff_sec * 1000000000 + diff_nsec)/1000000;
+
 	FILE *file = fopen("./logs/stats.csv", "w");
 	if (file == NULL) {
 		perror("Error opening file");
@@ -407,6 +419,7 @@ void post_exp_process()
 			fprintf(file, "rx_invalid,%lu\n",xsks[i]->ring_stats.rx_invalid_npkts);
 			fprintf(file, "rx_queue_full,%lu\n",xsks[i]->ring_stats.rx_full_npkts);
 			fprintf(file, "fill_ring_empty,%lu\n",xsks[i]->ring_stats.rx_fill_empty_npkts);
+			fprintf(file, "100M packets_time_in_ms,%lld\n",elapsed_ms);
 			// Warm buffer count
 			fprintf(file, "warm_count,%lld\n",warm_count);
 			fprintf(file, "cold_count,%lld\n",cold_count);
@@ -525,6 +538,22 @@ static void inline process_packet_mica (void *data, size_t length, u64 addr)
 
 static void inline process_packet(void *data, size_t length, u64 addr)
 {
+	if(pkt_count == 0)
+	{
+		if (clock_gettime(CLOCK_MONOTONIC, &start) == -1) {
+			perror("clock_gettime");
+			return;
+		}
+	}
+	// 100 million packets
+	else if(pkt_count == throughput_packets)
+	{
+		if (clock_gettime(CLOCK_MONOTONIC, &end) == -1) {
+			perror("clock_gettime");
+			return;
+		}
+	}
+
 	pkt_count++;
 
 	if(opt_application_type == 0)
