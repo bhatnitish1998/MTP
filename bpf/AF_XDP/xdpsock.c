@@ -66,6 +66,8 @@ Parameters to count
 // real applications
 #include "./ported-mica/hash.h"
 #include "./ported-mica/mehcached.h"
+#include "./maglev/hashmap.h"
+#include "./maglev/load_balancer.h"
 
 
 #ifndef SOL_XDP
@@ -148,7 +150,7 @@ VXwH8M67UqWgOEDJ04hrSLkManItieuCXYVGmTzLQ9pK35oJfNA2BRd1PbCyVXwH8\
 M67UqWgOEDJ04hrSLkManItieuCXYV";
 
 // DP 
-int decryption_key;
+int decryption_key =3;
 
 // MICA
 struct mehcached_table table_o;
@@ -163,9 +165,40 @@ char default_value [VALUE_SIZE];
 
 bool flag = false;
 
+// Maglev
+
+char bkd_addr[MAX_BACKENDS][INET_ADDRSTRLEN];
+int nbackends = 3;
+
+struct hashmap services;
+struct hashmap backends;
+struct hashmap maglev_tables;
+
+struct hashmap active_sessions;
+
 ///////////////// Throughput computation ///////////////
 struct timespec start, end;
 long long throughput_packets = 100000000;
+
+
+///////////////// Burst ///////////////////////////
+static bool opt_burst_tp = false;
+static const char *burst_tp_file = "";
+char burst_tp_file_path[256];
+#define INTERVAL_NS 10000000  // 10ms 
+#define MAX_BURST_TP_COUNT 3000
+static int burst_tp_count = 0;
+static unsigned long prev_tp = 0;
+
+struct burst_tp_info {
+	unsigned long interval;
+	u32 throughput;
+	u32 cdf_tp;
+};
+
+struct burst_tp_info burst_tp_array[MAX_BURST_TP_COUNT];
+
+struct timespec start_time_burst, current_time_burst;
 ///////////// Configuration variables ////////////////
 
 // queue sizes: Changing umem sizes changes their size accordingly -U
@@ -288,6 +321,202 @@ static const struct clockid_map {
 static int num_socks;
 struct xsk_socket_info *xsks[MAX_SOCKS];
 int sock;
+////////////////////////////////////////////////////////
+
+// Load balancer
+// vaddr,vport,proto
+struct service_entry {
+	struct service_id key;
+	struct service_info value;
+};
+// Bkd adr, port, IFindex, ifname
+struct backend_entry {
+	struct backend_id key;
+	struct backend_info value;
+};
+
+static void configure(struct maglev *mag, int num_bkds)
+{
+	int *bkd_mapping = mag->bkd_mapping;
+	int next[num_bkds];
+	// populate each bkd first
+	int permutation[num_bkds][MAGLEV_LOOKUP_SIZE];
+	for (int i = 0; i < num_bkds; i++) {
+		int hashval = murmurhash(&i, sizeof(int), 0);
+		int offset = hashval % MAGLEV_LOOKUP_SIZE;
+		int skip = hashval % (MAGLEV_LOOKUP_SIZE - 1) + 1;
+		for (int j = 0; j < MAGLEV_LOOKUP_SIZE; j++) {
+			permutation[i][j] = (((offset + j * skip) % MAGLEV_LOOKUP_SIZE) + MAGLEV_LOOKUP_SIZE) % MAGLEV_LOOKUP_SIZE;
+		}
+	}
+
+	for (int i = 0; i < num_bkds; i++) {
+		next[i] = 0;
+	}
+
+	for (int i = 0; i < MAGLEV_LOOKUP_SIZE; i++) {
+		bkd_mapping[i] = -1;
+	}
+
+	uint32_t filled = 0;
+	while (1) {
+		for (int i = 0; i < num_bkds; i++) {
+			if (next[i] >= MAGLEV_LOOKUP_SIZE)
+				continue;
+			int c = permutation[i][next[i]];
+			while (bkd_mapping[c] >= 0) {
+				next[i]++;
+				if (next[i] >= MAGLEV_LOOKUP_SIZE) {
+					break;
+				}
+				c = permutation[i][next[i]];
+			}
+			bkd_mapping[c] = i;
+			next[i]++;
+			filled++;
+			if (filled == MAGLEV_LOOKUP_SIZE) {
+				return;
+			}
+		}
+		bool end = true;
+		for (int i = 0; i < num_bkds; i++) {
+			if (next[i] < MAGLEV_LOOKUP_SIZE) {
+				end = false;
+				break;
+			}
+		}
+		if (end) {
+			break;
+		}
+	}
+
+	int bkd = 0;
+	int bkd1 = 0, bkd2 = 0;
+	for (int i = 0; i < MAGLEV_LOOKUP_SIZE; i++) {
+		if (bkd_mapping[i] < 0) {
+			bkd_mapping[i] = bkd;
+			bkd++;
+			bkd %= num_bkds;
+		}
+		if (bkd_mapping[i] == 0)
+			bkd1++;
+		else
+			bkd2++;
+	}
+}
+
+
+static void load_services(void)
+{
+	char *service_ip = "10.129.2.131"; 
+
+	unsigned int base_ip[4] = {192, 192, 192, 0};
+
+    for (int i = 0; i < MAX_BACKENDS; i++) {
+        snprintf(bkd_addr[i], INET_ADDRSTRLEN, "%u.%u.%u.%u",
+                 base_ip[0], base_ip[1], base_ip[2], base_ip[3] + i);
+    }
+
+
+	char proto[4];
+	unsigned srv_port, bkd_port;
+	uint8_t mac_addr[6];
+	struct service_info *srv_info;
+	struct backend_entry *bkd_entry;
+	struct in_addr addr;
+	int nservices = 1, service_first_free = 0;
+	int *srvindex;
+	struct service_entry *service_entries;
+	struct backend_entry *backend_entries;
+	struct hashmap srv_to_index;
+
+	hashmap_init(&services, sizeof(struct service_id), sizeof(struct service_info), MAX_SERVICES);
+	hashmap_init(&backends, sizeof(struct backend_id), sizeof(struct backend_info), MAX_BACKENDS);
+	hashmap_init(&maglev_tables, sizeof(struct service_id), sizeof(struct maglev), MAX_SERVICES);
+
+	service_entries = malloc(sizeof(struct service_entry) * nservices);
+	backend_entries = malloc(sizeof(struct backend_entry) * nbackends);
+	hashmap_init(&srv_to_index, sizeof(struct service_id), sizeof(int), nservices);
+
+	mac_addr[0] = 0x11;
+	mac_addr[1] = 0x22;
+	mac_addr[2] = 0x33;
+	mac_addr[3] = 0x44;
+	mac_addr[4] = 0x55;
+	mac_addr[5] = 0x66;
+	// Manually add services and backends
+	// Service 1: UDP from 192.168.1.1:80 to backend 192.168.1.2:8080
+	// strcpy(srv_addr, "192.168.1.1"); Stored from main fn itself
+	srv_port = 80;
+	bkd_port = 8080;
+	strcpy(proto, "UDP");
+	for (int index = 0; index < nbackends; index++) {
+		bkd_entry = &backend_entries[index];
+		inet_aton(service_ip, &addr);
+		bkd_entry->key.service.vaddr = addr.s_addr;
+		bkd_entry->key.service.vport = htons(srv_port);
+		bkd_entry->key.service.proto = IPPROTO_UDP;
+
+		inet_aton(bkd_addr[index], &addr);
+		bkd_entry->value.addr = addr.s_addr;
+		bkd_entry->value.port = htons(bkd_port);
+		__builtin_memcpy(&bkd_entry->value.mac_addr, mac_addr, sizeof(mac_addr));
+
+		srvindex = hashmap_lookup_elem(&srv_to_index, &bkd_entry->key.service);
+		if (!srvindex) {
+			struct service_entry *srv_entry = &service_entries[service_first_free];
+			srv_entry->key = bkd_entry->key.service;
+			srv_entry->value.backends = 0;
+			srv_info = &srv_entry->value;
+
+			if (hashmap_insert_elem(&srv_to_index, &srv_entry->key, &service_first_free) != 1) {
+				fprintf(stderr, "ERROR: unable to add service index to hash map\n");
+				exit(EXIT_FAILURE);
+			}
+
+			service_first_free++;
+		} else {
+			srv_info = &service_entries[*srvindex].value;
+		}
+
+		bkd_entry->key.index = srv_info->backends;
+		srv_info->backends++;
+	}
+
+	for (int i = 0; i < nservices; i++) {
+		// printf("%u, %u\n", service_entries[i].key.vaddr, (__u32)(service_entries[i].key.vport));
+		if (hashmap_insert_elem(&services, &service_entries[i].key, &service_entries[i].value) != 1) {
+			fprintf(stderr, "ERROR: unable to add service to hash map\n");
+			exit(EXIT_FAILURE);
+		}
+	}
+
+	for (int i = 0; i < nbackends; i++) {
+		if (hashmap_insert_elem(&backends, &backend_entries[i].key, &backend_entries[i].value) != 1) {
+			fprintf(stderr, "ERROR: unable to add backend to hash map\n");
+			exit(EXIT_FAILURE);
+		}
+	}
+
+	// Setting up lookup tables for nservices
+	for (int i = 0; i < nservices; i++) {
+		struct maglev *lookup = malloc(sizeof(struct maglev));
+		uint32_t num_bkds = service_entries[i].value.backends;
+		configure(lookup, num_bkds);
+		if (hashmap_insert_elem(&maglev_tables, &service_entries[i].key, lookup) != 1) {
+			fprintf(stderr, "ERROR: unable to add maglev table to hash map\n");
+			exit(EXIT_FAILURE);
+		}
+	}
+
+	printf("Added %u services and %u backends\n", nservices, nbackends);
+
+	free(service_entries);
+	free(backend_entries);
+	hashmap_free(&srv_to_index);
+
+	return;
+}
 
 ////////////////////////////////////////////////////////
 
@@ -396,9 +625,30 @@ static void xdpsock_cleanup(void)
 		remove_xdp_program();
 }
 
+static void burst_tp_print() {
+
+	u32 pkt_sum = 0;
+	FILE *file = fopen(burst_tp_file_path, "a");
+	if (file == NULL) {
+		perror("Error opening file");
+	}
+
+	fprintf(file, "i \t interval \t throughput \t cdf_tp\n");
+	//print each buffer addresse usage count
+	for(int i = 0; i < MAX_BURST_TP_COUNT; i++)
+	{
+		fprintf(file, "%d \t %ld \t %d \t %d\n", i, burst_tp_array[i].interval, burst_tp_array[i].throughput, burst_tp_array[i].cdf_tp);
+		pkt_sum += burst_tp_array[i].throughput;
+	}
+	fprintf(file, "Total num of packets recieved:%d\n", pkt_sum);
+
+	fclose(file);
+}
+
 
 void post_exp_process()
 {
+
 	long long diff_sec = end.tv_sec - start.tv_sec;
     long long diff_nsec = end.tv_nsec - start.tv_nsec;
 
@@ -414,7 +664,7 @@ void post_exp_process()
 	}
 	for (int i = 0; i < num_socks && xsks[i]; i++) {
 		if (!xsk_get_xdp_stats(xsk_socket__fd(xsks[i]->xsk), xsks[i])){
-			fprintf(file, "rx_packets,%lu\n",xsks[i]->ring_stats.rx_npkts);
+			fprintf(file, "rx_packets,%lld\n",pkt_count);
 			fprintf(file, "rx_dropped,%lu\n",xsks[i]->ring_stats.rx_dropped_npkts);
 			fprintf(file, "rx_invalid,%lu\n",xsks[i]->ring_stats.rx_invalid_npkts);
 			fprintf(file, "rx_queue_full,%lu\n",xsks[i]->ring_stats.rx_full_npkts);
@@ -434,9 +684,88 @@ void post_exp_process()
 	{
 		mehcached_table_free(table);
 	}
-		
-	
+
+	if(opt_burst_tp)
+		burst_tp_print();
+
+	if(opt_application_type ==5)
+		hashmap_free(&active_sessions);
 }
+
+
+static void inline process_packet_maglev(void *data, size_t length, u64 addr)
+{
+
+	struct ether_header *eth = (struct ether_header *)data;
+    struct iphdr *ip = (struct iphdr *)(data + sizeof(struct ether_header));
+    int ip_header_len = ip->ihl * 4;
+	struct udphdr *udp = (struct udphdr *)(data + sizeof(struct ether_header) + ip_header_len);
+
+
+	struct session_id sid = { 0 };
+	sid.saddr = ip->saddr;
+	sid.daddr = inet_addr("10.129.2.131");
+	sid.proto = ip->protocol;
+	sid.sport = udp->source;
+	sid.dport = htons(80);
+
+
+	/* Look for known sessions */
+	struct replace_info *rep = hashmap_lookup_elem(&active_sessions, &sid);
+	if (rep) {
+		return;
+	}
+
+	/* New session, apply load balancing logic */
+	struct service_id srvid = { .vaddr =sid.daddr, .vport = sid.dport, .proto = ip->protocol };
+	struct service_info *srvinfo = hashmap_lookup_elem(&services, &srvid);
+	if (!srvinfo) {
+		printf("ERROR: missing service --> DROPPING\n");
+		return;
+	}
+
+	struct backend_id bkdid = {
+		.service = srvid,
+		.index = ((struct maglev *)hashmap_lookup_elem(&maglev_tables, &srvid))
+				 ->bkd_mapping[murmurhash(&sid, sizeof(struct session_id), 0) % MAGLEV_LOOKUP_SIZE]
+	};
+	struct backend_info *bkdinfo = hashmap_lookup_elem(&backends, &bkdid);
+	if (!bkdinfo) {
+		printf("ERROR: missing backend --> DROPPING\n");
+		return;
+	}
+
+	/* Store the forward session */
+	struct replace_info fwd_rep;
+	fwd_rep.dir = DIR_TO_BACKEND;
+	fwd_rep.addr = bkdinfo->addr;
+	fwd_rep.port = bkdinfo->port;
+	fwd_rep.bkdindex = bkdid.index;
+	__builtin_memcpy(fwd_rep.mac_addr, &bkdinfo->mac_addr, sizeof(fwd_rep.mac_addr));
+	rep = &fwd_rep;
+	if (hashmap_insert_elem(&active_sessions, &sid, &fwd_rep) != 1) {
+		fprintf(stderr, "ERROR: unable to add forward session to map\n");
+		return;
+	}
+
+	/* Store the backward session */
+	struct replace_info bwd_rep;
+	bwd_rep.dir = DIR_TO_CLIENT;
+	bwd_rep.addr = srvid.vaddr;
+	bwd_rep.port = srvid.vport;
+	__builtin_memcpy(&bwd_rep.mac_addr, eth->ether_shost, sizeof(eth->ether_shost));
+	sid.daddr = sid.saddr;
+	sid.dport = sid.sport;
+	sid.saddr = bkdinfo->addr;
+	sid.sport = bkdinfo->port;
+	if (hashmap_insert_elem(&active_sessions, &sid, &bwd_rep) != 1) {
+		fprintf(stderr, "ERROR: unable to add backward session to map\n");
+		return;
+	}
+
+}
+
+
 
 static void inline process_packet_nat(void *data, size_t length, u64 addr)
 {
@@ -446,7 +775,7 @@ static void inline process_packet_nat(void *data, size_t length, u64 addr)
     int ip_header_len = ip->ihl * 4;
 	struct udphdr *udp = (struct udphdr *)(data + sizeof(struct ether_header) + ip_header_len);
 
-    // Change IP and port (Assuming SNAT; for DNAT, change ip->daddr and udp->dest)
+    // Change IP and port (Assuming SNAT;)
     ip->saddr = inet_addr(nat_ip);
     udp->source = htons(nat_port);
 }
@@ -571,6 +900,9 @@ static void inline process_packet(void *data, size_t length, u64 addr)
 	else if(opt_application_type == 4)
 		process_packet_mica(data,length,addr);
 
+	else if(opt_application_type == 5)
+		process_packet_maglev(data,length,addr);
+
 }
 
 
@@ -692,6 +1024,7 @@ static struct option long_options[] = {
 	{"soft-pf", no_argument, 0, 'P'},
 	{"app-type", required_argument, 0, 'A'},
 	{"count-cold", no_argument, 0, 'X'},
+	{"burst-tp", required_argument, 0, 'E'},
 	{0, 0, 0, 0}
 };
 
@@ -727,6 +1060,7 @@ static void usage(const char *prog)
 		"  -P, --soft-pf   Software prefetch next buffers \n"
 		"  -A, --app-type=type	Application type(0,1,2,3,4,5) \n"
 		"  -X, --count-cold   Count cold buffers \n"
+		"  -E, --burst-tp=file	Write per 100ms throughput to the given file \n"
 		"\n";
 	fprintf(stderr, str, prog, opt_xsk_frame_size,
 		opt_batch_size,SCHED_PRI__DEFAULT);
@@ -742,7 +1076,7 @@ static void parse_command_line(int argc, char **argv)
 
 	for (;;) {
 		c = getopt_long(argc, argv,
-				"i:q:pSNn:w:O:czf:muMd:b:BU:hWs:CPA:X",
+				"i:q:pSNn:w:O:czf:muMd:b:BU:hWs:CPA:XE:",
 				long_options, &option_index);
 		if (c == -1)
 			break;
@@ -845,9 +1179,15 @@ static void parse_command_line(int argc, char **argv)
 				printf("L2FWD application\n");
 			else if(opt_application_type == 4)
 				printf("MICA application \n");
+			else if(opt_application_type == 5)
+				printf("Maglev application \n");
 			break;
 		case 'X':
 			opt_count_cold = 1;
+			break;
+		case 'E':
+			opt_burst_tp = 1;
+			burst_tp_file = optarg;
 			break;
 		default:
 			usage(basename(argv[0]));
@@ -1018,6 +1358,23 @@ static void forward(struct xsk_socket_info *xsk)
 	xsk->outstanding_tx += frags_done;
 
 
+	if(opt_burst_tp && burst_tp_count < MAX_BURST_TP_COUNT){
+		clock_gettime(opt_clock, &current_time_burst);
+		u64 elapsed_time = (current_time_burst.tv_sec - start_time_burst.tv_sec) * 1e9 + 
+                          (current_time_burst.tv_nsec - start_time_burst.tv_nsec);
+		if(elapsed_time >= INTERVAL_NS) {
+			// printf("elapsed_time: %llu\n", elapsed_time);
+			burst_tp_array[burst_tp_count].interval = elapsed_time;
+			u32 curr_tp = xsk->ring_stats.rx_npkts;
+			u32 tp = curr_tp - prev_tp;
+			burst_tp_array[burst_tp_count].throughput = tp;
+			burst_tp_array[burst_tp_count].cdf_tp = curr_tp;
+			burst_tp_count++;
+			prev_tp = curr_tp;
+			clock_gettime(opt_clock, &start_time_burst);
+		}		
+	}
+
 	if(opt_count_cold)
 	{
 		if( prev_cons != *xsk->umem->fq.consumer)
@@ -1132,12 +1489,32 @@ static void receive(struct xsk_socket_info *xsk)
 	xsk->ring_stats.rx_npkts += eop_cnt;
 	xsk->ring_stats.rx_frags += rcvd;
 
+	if(opt_burst_tp && burst_tp_count < MAX_BURST_TP_COUNT){
+		clock_gettime(opt_clock, &current_time_burst);
+		u64 elapsed_time = (current_time_burst.tv_sec - start_time_burst.tv_sec) * 1e9 + 
+                          (current_time_burst.tv_nsec - start_time_burst.tv_nsec);
+		if(elapsed_time >= INTERVAL_NS) {
+			// printf("elapsed_time: %llu\n", elapsed_time);
+			burst_tp_array[burst_tp_count].interval = elapsed_time;
+			u32 curr_tp = xsk->ring_stats.rx_npkts;
+			u32 tp = curr_tp - prev_tp;
+			burst_tp_array[burst_tp_count].throughput = tp;
+			burst_tp_array[burst_tp_count].cdf_tp = curr_tp;
+			burst_tp_count++;
+			prev_tp = curr_tp;
+			clock_gettime(opt_clock, &start_time_burst);
+		}		
+	}
+
+
 	if(opt_count_cold)
 	{
+		int cons_move;
+		int prod_move;
 		if( prev_cons != *xsk->umem->fq.consumer)
 		{
-			int cons_move = *xsk->umem->fq.consumer - prev_cons;
-			int prod_move = *xsk->umem->fq.producer - prev_prod;
+			cons_move = *xsk->umem->fq.consumer - prev_cons;
+			prod_move = *xsk->umem->fq.producer - prev_prod;
 			prev_cons = *xsk->umem->fq.consumer; 
 			prev_prod = *xsk->umem->fq.producer;
 
@@ -1160,6 +1537,8 @@ static void receive(struct xsk_socket_info *xsk)
 				prod_extra += (prod_move-cons_move);
 			}
 		}
+
+		// printf("cons_move : %lld prod_move : %lld prod_extra : %lld warm_count : %lld cold_count : %lld\n", cons_move, prod_move, prod_extra, warm_count, cold_count);
 	}
 }
 
@@ -1360,6 +1739,11 @@ int main(int argc, char **argv)
 
 	srand(614);
 
+	if(opt_application_type == 5)
+	{
+		load_services();
+		hashmap_init(&active_sessions, sizeof(struct session_id), sizeof(struct replace_info), MAX_SESSIONS);
+	}
 
 	if(opt_application_type ==4)
 	{
@@ -1407,6 +1791,18 @@ int main(int argc, char **argv)
     if (stat("./logs", &st) == -1) {
         mkdir("./logs", 0777);
     }
+
+	if(opt_burst_tp)
+	{
+		snprintf(burst_tp_file_path, sizeof(burst_tp_file_path), "./logs/%s", burst_tp_file);
+		FILE *file = fopen(burst_tp_file_path, "w");
+		if (file == NULL) {
+			perror("Error opening file");
+		}
+		fclose(file);
+
+		clock_gettime(opt_clock, &start_time_burst);
+	}
 
 
 	/* Reserve memory for the umem. Use hugepages if unaligned chunk mode */
