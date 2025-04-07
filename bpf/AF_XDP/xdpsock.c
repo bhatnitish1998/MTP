@@ -525,14 +525,20 @@ static void inline prefetch_packet(void* addr)
 	char *pkt = (char*)addr;
 	__builtin_prefetch(&pkt[0],1,3);
 
-	if(opt_application_type == 2 || opt_application_type == 1){
+	if(opt_application_type == 4 ){
+		for(int i =1; i<= VALUE_SIZE; i+=64)
+		{	
+			__builtin_prefetch(&pkt[i],1,3);
+		}
+	}
+
+	else if(opt_application_type == 2)
+	{
 		for(int i =1; i< opt_packet_size; i+=64)
 		{	
-			if(opt_application_type==2)
 			__builtin_prefetch(&pkt[i],1,3);
-			else
-			__builtin_prefetch(&pkt[i],0,3);
 		}
+
 	}
 }
 
