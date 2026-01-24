@@ -1,82 +1,31 @@
-#+Title: AF_XDP socket sample application
+# Toasty
+Toasty: Speeding Up Network I/O with Cache-Warm Buffers
 
-This is a sample application for AF_XDP sockets. It was originally in
-the Linux source code tree under samples/bpf and called xdpsock. The
-main purpose of it is to demonstrate the various capabilities of
-AF_XDP. It is not meant to be a minimal example of what you need to do
-to get things up and running.
+Toasty consists of two components built on top of the AF_XDP packet I/O framework. First, the userspace packet buffer pool management in AF_XDP works as a LIFO stack rather than a FIFO queue, so that recently recycled warm buffers are reused for future packets immediately. Second is the kernel device driver that populates the NIC RX ring, adjusting the number of buffers in circulation based on incoming load and application processing rate to improve cache locality while remaining resilient to packet loss.
 
-The application contains three micro-benchmarks:
+This repo contains the LIFO-based Buffer Pool Userspace component of Toasty. The kernel-space adaptive RX ring refill is present in the Toasty-kernel repo. Workloads used for experimentation are NAT, IDS, Decryption, L2Fwd, MICA, and Maglev.
 
-rxdrop: Receives a packet then immediately drops it without touching
-        the packet data. (-r command line option)
-
-txpush: Sends pregenerated packets as fast as possible. Never touches
-        packet data during the send phase. (-t command line option)
-
-l2fwd: A simple mac swap benchmark that receives a packet, swaps the
-       mac addresses in the Ethernet header, then sends it out. This
-       benchmark touches the first cache line of the packets.
-
-Here is the simplest command line for launching the rxdrop benchmark
-in this example:
+Here is the simplest command line for running the NAT application:
 
 #+BEGIN_SRC sh
-sudo taskset -c <app core> ./xdpsock -i <interface> -q <queue_id> -r
+sudo taskset -c <app_core> ./bpf/AF_XDP/xdpsock -i <interface> -A <app_id> -U <umem_size> -s <packet_size> -B -W 
 #+END_SRC
 
-When running in the default softirq mode, it is good to have the
-application and the driver executing on different cores. So, make
-app_core != queue_id, in a standard Linux config, otherwise
-performance will suffer.
+Check logs/stats.csv file to get number of packets received and other stats after exiting application.
 
-Some interesting capabilities that are demonstrated by xdpsock:
+**The application contains six workloads:**
+(App 0)  NAT looks up and rewrites IP address bytes in the packet headers after reading them. 
+(App 1) IDS is an application that reads and compares bytes in the payload with a pre-defined pattern. 
+(App 2) Decryption is a proxy server in which the application reads the entire payload, decrypts it, and rewrites the contents of the packet. 
+(App 3) L2Fwd is a swap-and-forward application which reads and updates the MAC address, and then forwards the packets back into the network. 
+(App 4) MICA is an optimized key-value server that handles get/put requests in the packet, retrieves/updates key-value pairs in memory, then sends back the packet to the client. 
+(App 5) Maglev is a hashing-based L4 load balancer
 
-* Busy-Poll mode
 
-Busy-poll mode. In this mode both the application and the driver can
-be run efficiently on the same core. The kernel driver is explicitly
-invoked by the application by calling either recvmsg() or
-sendto(). Invoke this by setting the -B option. The -b option can be
-used to set the batch size that the driver will use. For example:
-
-#+BEGIN_SRC sh
-  sudo taskset -c 2 ./xdpsock -i <interface> -q 2 -l -N -B -b 256
-#+END_SRC
-
-Note that you have to enable busy_poll explicitly for the netdev. Here
-is one example:
+**Busy-Poll mode**
+In this mode both the application and the driver can be run efficiently on the same core. The kernel driver is explicitly invoked by the application by calling either recvmsg() or sendto(). Invoke this by setting the -B option. The -b option can be used to set the batch size that the driver will use. Note that you have to enable busy_poll explicitly for the netdev. Following setup is included in the setup_script:
 
 #+BEGIN_SRC sh
   echo 2 | sudo tee /sys/class/net/<interface>/napi_defer_hard_irqs
   echo 200000 | sudo tee /sys/class/net/<interface>/gro_flush_timeout
 #+END_SRC
-
-* Sharing a UMEM between sockets
-
-XDP_SHARED_UMEM mode, where a single umem is shared between multiple
-sockets. Note that this example demonstrates how to share the umem
-between sockets bound to the same netdev and queue id. This can be
-enabled with the -M option. For an example on how to share a umem
-between sockets with different netdevs and/or queue ids, please take a
-look at the AF_XDP-forwarding example.
-
-* Statistics
-
-Various statistics can be dumped with the -a and -x options. The -I
-option can also be used to dump statistics about interrupts, but
-requires the user to supply the interrupt vector name that can be
-found in /proc/interrupts.
-
-* Unaligned Mode
-
-Unaligned mode in which buffers can be placed at any place in the
-umem. For the default aligned mode, recieved buffers will be placed at
-a standard offset (256 bytes) from the start of the chunk, and a
-packet cannot cross a chunk boundary. In unaligned mode, there are no
-chunks. If you put an address into the fill ring, the packet will be
-received at exactly that address. In aligned mode, it will be put at
-the standard offset in the chunk that the fill address points to.
-
-Unaligned mode requires huge pages to be feasible. Please see the
-example code.

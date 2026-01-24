@@ -10,10 +10,6 @@
 #include <linux/udp.h>
 #include <cjson/cJSON.h>
 
-#include <flash_nf.h>
-#include <flash_params.h>
-#include <flash_uds.h>
-
 #include "hashmap.h"
 #include "load_balancer.h"
 

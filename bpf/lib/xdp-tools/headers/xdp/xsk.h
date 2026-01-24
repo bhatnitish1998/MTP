@@ -66,7 +66,6 @@ XDP_ALWAYS_INLINE void custom_xsk_ring_prod__fill_addr(struct xsk_ring_prod *fil
 	__u64 *addrs = (__u64 *)fill->ring;
 	__u64 oldval = __atomic_exchange_n (&addrs[(*fill->consumer +i) & fill->mask],addr,__ATOMIC_ACQ_REL);
 	*xsk_ring_prod__fill_addr(fill, idx) = oldval;
-	
 }
 
 XDP_ALWAYS_INLINE const __u64 *
@@ -132,13 +131,19 @@ XDP_ALWAYS_INLINE __u32 xsk_cons_nb_avail(struct xsk_ring_cons *r, __u32 nb)
 
 XDP_ALWAYS_INLINE __u32 xsk_ring_prod__reserve(struct xsk_ring_prod *prod, __u32 nb, __u32 *idx)
 {
-	if (xsk_prod_nb_free(prod, nb) < nb)
-		return 0;
+	__u32 reserve = xsk_prod_nb_free(prod, nb);
+	if (reserve > 0 && reserve < nb) {
+		*idx = prod->cached_prod;
+		prod->cached_prod += reserve;
+		return reserve;
+	}
+	else if (reserve >= nb){
+		*idx = prod->cached_prod;
+		prod->cached_prod += nb;
+		return nb;
+	}
 
-	*idx = prod->cached_prod;
-	prod->cached_prod += nb;
-
-	return nb;
+	return 0;
 }
 
 XDP_ALWAYS_INLINE void xsk_ring_prod__submit(struct xsk_ring_prod *prod, __u32 nb)

@@ -1,6 +1,5 @@
 #!/bin/sh
 # SPDX-License-Identifier: GPL-2.0
-# This is not an autoconf generated configure
 #
 
 # Output file which is input to Makefile

@@ -4,16 +4,8 @@ Applications
 1 = IDS (DPI Reads entire packet and checks if it matches a pattern)
 2 = Decryption proxy (Reads the data and writes decrypted data)
 3 = L2 forward (MACSWAP and transmit)
-4 = Key value store (GET (send back value) and STORE requests (send back aknowledgement)) 
-*/
-
-/*
-Parameters to count
-1. Throughput (Data / lastpacket time - first packet time)
-2. Latency  (pktgen)
-3. L2 miss rate (perf)
-4. LLC miss rate (perf)
-5. Cold count (based on consumer producer movement)
+4 = MICA: Key value store (GET (send back value) and STORE requests (send back aknowledgement))
+5 = Maglev
 */
 
 #include <errno.h>
@@ -108,7 +100,6 @@ static const char *opt_if = "";
 static int opt_ifindex;
 static int opt_queue;
 static unsigned long opt_duration;
-static unsigned long start_time;
 static bool benchmark_done;
 static u16 opt_pkt_size = MIN_PKT_SIZE;
 static int opt_poll;
@@ -157,11 +148,11 @@ struct mehcached_table table_o;
 struct mehcached_table *table;
 
 #define NUM_KEYS 2000
-#define VALUE_SIZE 256
+static int VALUE_SIZE = 256;
 
 size_t default_keys [NUM_KEYS];
 int keys_index = 0;
-char default_value [VALUE_SIZE];
+
 
 bool flag = false;
 
@@ -173,35 +164,11 @@ int nbackends = 3;
 struct hashmap services;
 struct hashmap backends;
 struct hashmap maglev_tables;
-
 struct hashmap active_sessions;
 
-///////////////// Throughput computation ///////////////
-struct timespec start, end;
-long long throughput_packets = 100000000;
+///////////// Default Configuration ////////////////
 
-
-///////////////// Burst ///////////////////////////
-static bool opt_burst_tp = false;
-static const char *burst_tp_file = "";
-char burst_tp_file_path[256];
-#define INTERVAL_NS 10000000  // 10ms 
-#define MAX_BURST_TP_COUNT 3000
-static int burst_tp_count = 0;
-static unsigned long prev_tp = 0;
-
-struct burst_tp_info {
-	unsigned long interval;
-	u32 throughput;
-	u32 cdf_tp;
-};
-
-struct burst_tp_info burst_tp_array[MAX_BURST_TP_COUNT];
-
-struct timespec start_time_burst, current_time_burst;
-///////////// Configuration variables ////////////////
-
-// queue sizes: Changing umem sizes changes their size accordingly -U
+// Queues size changes accordingly to Umem size
 static u64 umem_size = 4096;
 static u32 fq_size = 4096;
 static u32 cq_size = 2048;
@@ -223,6 +190,13 @@ static bool opt_complete_umem;
 static bool opt_spf = false;
 static bool opt_count_cold = false;
 
+////////////// Debug Address //////////
+#define MAX_UMEM_SIZE 16384
+int addr_count_array[MAX_UMEM_SIZE];
+
+static bool opt_debug_addr = false;
+static const char *addr_file = "";
+char addr_file_path[256];
 
 ////////////// Packet related variables //////////////
 
@@ -232,19 +206,14 @@ static long long pkt_count = 0;
 /////////////// Warm buffers & addresses  ////////////
 static bool opt_warm_buffers = false;
 
-static long long warm_count;
-static long long cold_count;
-static long long prev_prod = 16384;
-static long long prev_cons = 0;
-static long long prod_extra = 0;
 struct addr_info{
 	u32 number;
 	u64 addr;
 	u32 len;
 };
 
-static int to_add =-1;
-u64 prev_consumer =0;
+static int to_add = -1;
+u64 prev_consumer = 0;
 
 ////////////////////////////////////////
 
@@ -408,7 +377,7 @@ static void configure(struct maglev *mag, int num_bkds)
 
 static void load_services(void)
 {
-	char *service_ip = "10.129.2.131"; 
+	char *service_ip = "10.129.2.121"; 
 
 	unsigned int base_ip[4] = {192, 192, 192, 0};
 
@@ -555,13 +524,6 @@ static int get_clockid(clockid_t *id, const char *name)
 	return -1;
 }
 
-static unsigned long get_nsecs(void)
-{
-	struct timespec ts;
-
-	clock_gettime(opt_clock, &ts);
-	return ts.tv_sec * 1000000000UL + ts.tv_nsec;
-}
 
 
 static int xsk_get_xdp_stats(int fd, struct xsk_socket_info *xsk)
@@ -631,22 +593,22 @@ static void xdpsock_cleanup(void)
 		remove_xdp_program();
 }
 
-static void burst_tp_print() {
 
-	u32 pkt_sum = 0;
-	FILE *file = fopen(burst_tp_file_path, "a");
+static void debug_addresses()
+{
+	long int pkt_sum = 0;
+	FILE *file = fopen(addr_file_path, "a");
 	if (file == NULL) {
 		perror("Error opening file");
 	}
-
-	fprintf(file, "i \t interval \t throughput \t cdf_tp\n");
+	
 	//print each buffer addresse usage count
-	for(int i = 0; i < MAX_BURST_TP_COUNT; i++)
+	for(int i = 0; i < umem_size; i++)
 	{
-		fprintf(file, "%d \t %ld \t %d \t %d\n", i, burst_tp_array[i].interval, burst_tp_array[i].throughput, burst_tp_array[i].cdf_tp);
-		pkt_sum += burst_tp_array[i].throughput;
+		fprintf(file, "address:%d \t count:%d\n", i, addr_count_array[i]);
+		pkt_sum += addr_count_array[i];
 	}
-	fprintf(file, "Total num of packets recieved:%d\n", pkt_sum);
+	fprintf(file, "Total num of packets:%ld\n", pkt_sum);
 
 	fclose(file);
 }
@@ -654,16 +616,6 @@ static void burst_tp_print() {
 
 void post_exp_process()
 {
-
-	long long diff_sec = end.tv_sec - start.tv_sec;
-    long long diff_nsec = end.tv_nsec - start.tv_nsec;
-
-	if (diff_nsec < 0) {
-        diff_sec -= 1;
-        diff_nsec += 1000000000L;
-    }
-    long long elapsed_ms = (diff_sec * 1000000000 + diff_nsec)/1000000;
-
 	FILE *file = fopen("./logs/stats.csv", "w");
 	if (file == NULL) {
 		perror("Error opening file");
@@ -675,10 +627,6 @@ void post_exp_process()
 			fprintf(file, "rx_invalid,%lu\n",xsks[i]->ring_stats.rx_invalid_npkts);
 			fprintf(file, "rx_queue_full,%lu\n",xsks[i]->ring_stats.rx_full_npkts);
 			fprintf(file, "fill_ring_empty,%lu\n",xsks[i]->ring_stats.rx_fill_empty_npkts);
-			fprintf(file, "100M packets_time_in_ms,%lld\n",elapsed_ms);
-			// Warm buffer count
-			fprintf(file, "warm_count,%lld\n",warm_count);
-			fprintf(file, "cold_count,%lld\n",cold_count);
 			// Write dummy count to avoid compiler optimization
 			fprintf(file, "dummy_count,%d\n",dummy_count);
 		}
@@ -691,11 +639,11 @@ void post_exp_process()
 		mehcached_table_free(table);
 	}
 
-	if(opt_burst_tp)
-		burst_tp_print();
-
 	if(opt_application_type ==5)
 		hashmap_free(&active_sessions);
+
+	if(opt_debug_addr)
+		debug_addresses();
 }
 
 
@@ -710,7 +658,7 @@ static void inline process_packet_maglev(void *data, size_t length, u64 addr)
 
 	struct session_id sid = { 0 };
 	sid.saddr = ip->saddr;
-	sid.daddr = inet_addr("10.129.2.131");
+	sid.daddr = inet_addr("10.129.2.121");
 	sid.proto = ip->protocol;
 	sid.sport = udp->source;
 	sid.dport = htons(80);
@@ -789,10 +737,13 @@ static void inline process_packet_nat(void *data, size_t length, u64 addr)
 
 static void inline process_packet_ids(void *data, size_t length, u64 addr)
 {
-	if(memcmp(data, signature, length) == 0)
-		dummy_count++;
-	else
-		dummy_count--;
+
+	unsigned char *pkt = (unsigned char *)data;
+	for(int i =0; i<length;i+=64)
+	{
+		if(pkt[i]=='a')
+			dummy_count++;
+	}
 }
 
 static void inline process_packet_decryption(void *data, size_t length, u64 addr)
@@ -814,6 +765,7 @@ static void inline process_packet_decryption(void *data, size_t length, u64 addr
 
 static void inline process_packet_l2fwd(void *data, size_t length, u64 addr)
 {
+	
 	struct ether_header *eth = (struct ether_header *)data;
 	struct ether_addr *src_addr = (struct ether_addr *)&eth->ether_shost;
 	struct ether_addr *dst_addr = (struct ether_addr *)&eth->ether_dhost;
@@ -835,7 +787,7 @@ static void inline process_packet_mica (void *data, size_t length, u64 addr)
 	int payload_len = udp_length - sizeof(struct udphdr);
 	
 	size_t key;
-	char value[256];
+	char value[VALUE_SIZE];
 	
 	// get key
 	memcpy(&key, payload, sizeof(size_t));
@@ -853,41 +805,79 @@ static void inline process_packet_mica (void *data, size_t length, u64 addr)
 			assert(value_length == sizeof(value));
 
 		// send value
-		memcpy(payload + sizeof(size_t), &value, 256);
+		memcpy(payload + sizeof(size_t), &value, VALUE_SIZE);
 	}
 	
 	// STORE 
 	else 
 	{
-		memcpy(value, payload + sizeof(size_t), 256);
-		value[255] = '\0';
+		memcpy(value, payload + sizeof(size_t), VALUE_SIZE);
+		value[VALUE_SIZE-1] = '\0';
 		uint64_t key_hash = hash((const uint8_t *)&key, sizeof(key));
 		if (!mehcached_set(0, table, key_hash, (const uint8_t *)&key, sizeof(key), (const uint8_t *)&value, sizeof(value), 0, true))
 			assert(false);
 
 		// send acknowledgement
-		memcpy(payload + sizeof(size_t),&value, 256);
+		memcpy(payload + sizeof(size_t),&value, VALUE_SIZE);
 		
 	}
 }
 
+/* --- 1. L3 Checksum Helper --- */
+static inline u16 ip_checksum(void *vdata, size_t length)
+{
+    u32 sum = 0;
+    u16 *ptr = vdata;
+
+    while (length > 1) {
+        sum += *ptr++;
+        length -= 2;
+    }
+    if (length > 0)
+        sum += *(u8 *)ptr;
+
+    while (sum >> 16)
+        sum = (sum & 0xFFFF) + (sum >> 16);
+
+    return ~sum;
+}
+
+/* --- 2. L3 Processing Logic (Matches DPDK l3fwd_same_port) --- */
+static inline int process_packet_l3fwd_same_port(void *data, size_t length, u64 addr)
+{
+    struct ethhdr *eth = data;
+
+    /* Only IPv4 */
+    if (ntohs(eth->h_proto) != ETH_P_IP)
+        return 0;
+
+    struct iphdr *ip = (struct iphdr *)(eth + 1);
+
+    /* Basic Validation (Version 4, IHL >= 5) */
+    if (ip->version != 4 || ip->ihl < 5)
+        return 0;
+
+    /* TTL handling: Drop if expired */
+    if (ip->ttl <= 1)
+        return 0;
+
+    ip->ttl--;
+
+    /* Recompute IPv4 Checksum */
+    ip->check = 0;
+    ip->check = ip_checksum(ip, ip->ihl * 4);
+
+    /* Rewrite MACs: Swap Src and Dst for same-port reflection */
+    u8 tmp_mac[ETH_ALEN];
+    memcpy(tmp_mac, eth->h_dest, ETH_ALEN);
+    memcpy(eth->h_dest, eth->h_source, ETH_ALEN);
+    memcpy(eth->h_source, tmp_mac, ETH_ALEN);
+
+    return 1; /* Success: Ready to Forward */
+}
+
 static void inline process_packet(void *data, size_t length, u64 addr)
 {
-	if(pkt_count == 0)
-	{
-		if (clock_gettime(CLOCK_MONOTONIC, &start) == -1) {
-			perror("clock_gettime");
-			return;
-		}
-	}
-	// 100 million packets
-	else if(pkt_count == throughput_packets)
-	{
-		if (clock_gettime(CLOCK_MONOTONIC, &end) == -1) {
-			perror("clock_gettime");
-			return;
-		}
-	}
 
 	pkt_count++;
 
@@ -909,6 +899,8 @@ static void inline process_packet(void *data, size_t length, u64 addr)
 	else if(opt_application_type == 5)
 		process_packet_maglev(data,length,addr);
 
+	else if(opt_application_type == 6)
+		process_packet_l3fwd_same_port(data,length,addr);
 }
 
 
@@ -1031,6 +1023,7 @@ static struct option long_options[] = {
 	{"app-type", required_argument, 0, 'A'},
 	{"count-cold", no_argument, 0, 'X'},
 	{"burst-tp", required_argument, 0, 'E'},
+        {"debug-addr", required_argument, 0, 'D'},
 	{0, 0, 0, 0}
 };
 
@@ -1067,6 +1060,7 @@ static void usage(const char *prog)
 		"  -A, --app-type=type	Application type(0,1,2,3,4,5) \n"
 		"  -X, --count-cold   Count cold buffers \n"
 		"  -E, --burst-tp=file	Write per 100ms throughput to the given file \n"
+                "  -D, --debug-addr=file   Debug addresses in given file \n"
 		"\n";
 	fprintf(stderr, str, prog, opt_xsk_frame_size,
 		opt_batch_size,SCHED_PRI__DEFAULT);
@@ -1082,7 +1076,7 @@ static void parse_command_line(int argc, char **argv)
 
 	for (;;) {
 		c = getopt_long(argc, argv,
-				"i:q:pSNn:w:O:czf:muMd:b:BU:hWs:CPA:XE:",
+				"i:q:pSNn:w:O:czf:muMd:b:BU:hWs:CPA:XE:D:",
 				long_options, &option_index);
 		if (c == -1)
 			break;
@@ -1166,12 +1160,17 @@ static void parse_command_line(int argc, char **argv)
 			break;
 		case 's':
 			opt_packet_size = atoi(optarg);
+			VALUE_SIZE = opt_packet_size/2;
 			break;
 		case 'C':
 			opt_complete_umem = 1;
 			break;
 		case 'P':
 			opt_spf = 1;
+			break;
+		case 'D':
+			opt_debug_addr =1;
+			addr_file = optarg;
 			break;
 		case 'A':
 			opt_application_type = atoi(optarg);
@@ -1187,6 +1186,8 @@ static void parse_command_line(int argc, char **argv)
 				printf("MICA application \n");
 			else if(opt_application_type == 5)
 				printf("Maglev application \n");
+			else if(opt_application_type == 6)
+				printf("L3FWD application \n");
 			break;
 		case 'X':
 			opt_count_cold = 1;
@@ -1239,7 +1240,6 @@ static inline void complete_tx_forward(struct xsk_socket_info *xsk)
 	if (!xsk->outstanding_tx)
 		return;
 
-
 	if (opt_xdp_bind_flags & XDP_COPY) {
 		xsk->app_stats.copy_tx_sendtos++;
 		kick_tx(xsk);
@@ -1291,36 +1291,123 @@ static inline void complete_tx_forward(struct xsk_socket_info *xsk)
 }
 
 
+/* --- 3. Modified Forward Loop with Drop Support --- */
+static void l3forward(struct xsk_socket_info *xsk)
+{
+    u32 idx_rx = 0, idx_tx = 0, idx_fq = 0;
+    unsigned int rcvd, i;
+    unsigned int tx_count = 0, drop_count = 0;
+    int ret;
+
+    complete_tx_forward(xsk);
+
+    /* Peek RX Ring */
+    rcvd = xsk_ring_cons__peek(&xsk->rx, opt_batch_size, &idx_rx);
+    if (!rcvd) {
+        if (opt_busy_poll || xsk_ring_prod__needs_wakeup(&xsk->umem->fq)) {
+            xsk->app_stats.rx_empty_polls++;
+            recvfrom(xsk_socket__fd(xsk->xsk), NULL, 0, MSG_DONTWAIT, NULL, NULL);
+        }
+        return;
+    }
+
+    /* Reserve space in TX ring (for potential forwards) 
+     * and Fill Ring (for potential drops) */
+    ret = xsk_ring_prod__reserve(&xsk->tx, rcvd, &idx_tx);
+    while (ret < rcvd) {
+		if (ret < 0)
+			exit_with_error(-ret);
+        complete_tx_forward(xsk);
+        ret = xsk_ring_prod__reserve(&xsk->tx, rcvd, &idx_tx);
+    }
+
+    ret = xsk_ring_prod__reserve(&xsk->umem->fq, rcvd, &idx_fq);
+    while (ret < rcvd) {
+        ret = xsk_ring_prod__reserve(&xsk->umem->fq, rcvd, &idx_fq);
+    }
+
+    for (i = 0; i < rcvd; i++) {
+        const struct xdp_desc *desc = xsk_ring_cons__rx_desc(&xsk->rx, idx_rx++);
+        u64 addr = desc->addr;
+        u32 len = desc->len;
+        u64 orig = xsk_umem__extract_addr(addr);
+
+        addr = xsk_umem__add_offset_to_addr(addr);
+        char *pkt = xsk_umem__get_data(xsk->umem->buffer, addr);
+
+        /* Software Prefetch next packet if enabled */
+        if (opt_spf && i < rcvd - 1) {
+            const struct xdp_desc *next_desc = xsk_ring_cons__rx_desc(&xsk->rx, idx_rx);
+            _mm_prefetch(xsk_umem__get_data(xsk->umem->buffer, next_desc->addr), _MM_HINT_T0);
+        }
+
+        /* Logic Switch */
+        int action = 0;
+        if (opt_application_type == 6) {
+            action = process_packet_l3fwd_same_port(pkt, len);
+        } else {
+            process_packet_l2fwd(pkt, len, addr);
+            action = 1;
+        }
+
+        if (action) {
+            /* MOVE TO TX RING (Forward) */
+            struct xdp_desc *tx_desc = xsk_ring_prod__tx_desc(&xsk->tx, idx_tx + tx_count);
+            tx_desc->addr = orig;
+            tx_desc->len = len;
+            tx_desc->options = 0;
+            tx_count++;
+            pkt_count++;
+        } else {
+            /* MOVE DIRECTLY TO FILL RING (Drop/Recycle) */
+            *xsk_ring_prod__fill_addr(&xsk->umem->fq, idx_fq + drop_count) = orig;
+            drop_count++;
+        }
+    }
+
+    /* Submit what we produced */
+    if (tx_count > 0)
+        xsk_ring_prod__submit(&xsk->tx, tx_count);
+    if (drop_count > 0)
+        xsk_ring_prod__submit(&xsk->umem->fq, drop_count);
+
+    /* Release what we consumed */
+    xsk_ring_cons__release(&xsk->rx, rcvd);
+
+    xsk->outstanding_tx += tx_count;
+    xsk->ring_stats.rx_npkts += rcvd;
+    xsk->ring_stats.tx_npkts += tx_count;
+}
+
+
 static void forward(struct xsk_socket_info *xsk)
 {
 	u32 idx_rx = 0, idx_tx = 0, frags_done = 0;
-	unsigned int rcvd, i, eop_cnt = 0;
+	unsigned int rcvd1, rcvd, i, eop_cnt = 0;
 	static u32 nb_frags;
 	int ret;
 
 	complete_tx_forward(xsk);
 
 	// check if batch ready to receive
-	rcvd = xsk_ring_cons__peek(&xsk->rx, opt_batch_size, &idx_rx);
-	if (!rcvd) {
+	rcvd1 = xsk_ring_cons__peek(&xsk->rx, opt_batch_size, &idx_rx);
+	if (!rcvd1) {
 		if (opt_busy_poll || xsk_ring_prod__needs_wakeup(&xsk->umem->fq)) {
 			xsk->app_stats.rx_empty_polls++;
 			recvfrom(xsk_socket__fd(xsk->xsk), NULL, 0, MSG_DONTWAIT, NULL, NULL);
 		}
 		return;
 	}
+	rcvd = rcvd1;
 
 	// reserve the tx ring to put back the addresses
 	ret = xsk_ring_prod__reserve(&xsk->tx, rcvd, &idx_tx);
-	while (ret != rcvd) {
-		if (ret < 0)
-			exit_with_error(-ret);
-		complete_tx_forward(xsk);
-		if (opt_busy_poll || xsk_ring_prod__needs_wakeup(&xsk->tx)) {
-			xsk->app_stats.tx_wakeup_sendtos++;
-			kick_tx(xsk);
-		}
-		ret = xsk_ring_prod__reserve(&xsk->tx, rcvd, &idx_tx);
+	
+	if (ret < 0)
+		exit_with_error(-ret);
+	else if (ret <= rcvd1)
+	{
+		rcvd = rcvd1;
 	}
 
 	// process each packets and put back the addresses of buffers
@@ -1336,7 +1423,6 @@ static void forward(struct xsk_socket_info *xsk)
 
 		if (!nb_frags++){
 			process_packet(pkt,len,addr);
-
 		}
 
 		struct xdp_desc *tx_desc = xsk_ring_prod__tx_desc(&xsk->tx, idx_tx++);
@@ -1362,55 +1448,6 @@ static void forward(struct xsk_socket_info *xsk)
 	xsk->ring_stats.rx_frags += rcvd;
 	xsk->ring_stats.tx_frags += rcvd;
 	xsk->outstanding_tx += frags_done;
-
-
-	if(opt_burst_tp && burst_tp_count < MAX_BURST_TP_COUNT){
-		clock_gettime(opt_clock, &current_time_burst);
-		u64 elapsed_time = (current_time_burst.tv_sec - start_time_burst.tv_sec) * 1e9 + 
-                          (current_time_burst.tv_nsec - start_time_burst.tv_nsec);
-		if(elapsed_time >= INTERVAL_NS) {
-			// printf("elapsed_time: %llu\n", elapsed_time);
-			burst_tp_array[burst_tp_count].interval = elapsed_time;
-			u32 curr_tp = xsk->ring_stats.rx_npkts;
-			u32 tp = curr_tp - prev_tp;
-			burst_tp_array[burst_tp_count].throughput = tp;
-			burst_tp_array[burst_tp_count].cdf_tp = curr_tp;
-			burst_tp_count++;
-			prev_tp = curr_tp;
-			clock_gettime(opt_clock, &start_time_burst);
-		}		
-	}
-
-	if(opt_count_cold)
-	{
-		if( prev_cons != *xsk->umem->fq.consumer)
-		{
-			int cons_move = *xsk->umem->fq.consumer - prev_cons;
-			int prod_move = *xsk->umem->fq.producer - prev_prod;
-			prev_cons = *xsk->umem->fq.consumer; 
-			prev_prod = *xsk->umem->fq.producer;
-
-			if(cons_move > prod_move + prod_extra)
-			{
-				cold_count += cons_move - (prod_move + prod_extra);
-				warm_count += prod_move + prod_extra;
-				prod_extra =0;
-			}
-
-			else if( cons_move > prod_move)
-			{
-				warm_count += cons_move;
-				prod_extra -= (cons_move - prod_move);
-			}
-
-			else	
-			{
-				warm_count += cons_move;
-				prod_extra += (prod_move-cons_move);
-			}
-		}
-	}
-	
 }
 
 static void receive(struct xsk_socket_info *xsk)
@@ -1468,10 +1505,14 @@ static void receive(struct xsk_socket_info *xsk)
 			u64 addr = desc->addr;
 			char *pkt = xsk_umem__get_data(xsk->umem->buffer, addr);
 			prefetch_packet(pkt);
-	}
+		}
 
 		if (!nb_frags++){ 
 			process_packet(pkt,len,addr);
+		}
+
+		if(opt_debug_addr){
+			addr_count_array[addr/opt_xsk_frame_size]++;
 		}
 
 		if (eop) {
@@ -1495,57 +1536,6 @@ static void receive(struct xsk_socket_info *xsk)
 	xsk->ring_stats.rx_npkts += eop_cnt;
 	xsk->ring_stats.rx_frags += rcvd;
 
-	if(opt_burst_tp && burst_tp_count < MAX_BURST_TP_COUNT){
-		clock_gettime(opt_clock, &current_time_burst);
-		u64 elapsed_time = (current_time_burst.tv_sec - start_time_burst.tv_sec) * 1e9 + 
-                          (current_time_burst.tv_nsec - start_time_burst.tv_nsec);
-		if(elapsed_time >= INTERVAL_NS) {
-			// printf("elapsed_time: %llu\n", elapsed_time);
-			burst_tp_array[burst_tp_count].interval = elapsed_time;
-			u32 curr_tp = xsk->ring_stats.rx_npkts;
-			u32 tp = curr_tp - prev_tp;
-			burst_tp_array[burst_tp_count].throughput = tp;
-			burst_tp_array[burst_tp_count].cdf_tp = curr_tp;
-			burst_tp_count++;
-			prev_tp = curr_tp;
-			clock_gettime(opt_clock, &start_time_burst);
-		}		
-	}
-
-
-	if(opt_count_cold)
-	{
-		int cons_move;
-		int prod_move;
-		if( prev_cons != *xsk->umem->fq.consumer)
-		{
-			cons_move = *xsk->umem->fq.consumer - prev_cons;
-			prod_move = *xsk->umem->fq.producer - prev_prod;
-			prev_cons = *xsk->umem->fq.consumer; 
-			prev_prod = *xsk->umem->fq.producer;
-
-			if(cons_move > prod_move + prod_extra)
-			{
-				cold_count += cons_move - (prod_move + prod_extra);
-				warm_count += prod_move + prod_extra;
-				prod_extra =0;
-			}
-
-			else if( cons_move > prod_move)
-			{
-				warm_count += cons_move;
-				prod_extra -= (cons_move - prod_move);
-			}
-
-			else	
-			{
-				warm_count += cons_move;
-				prod_extra += (prod_move-cons_move);
-			}
-		}
-
-		// printf("cons_move : %lld prod_move : %lld prod_extra : %lld warm_count : %lld cold_count : %lld\n", cons_move, prod_move, prod_extra, warm_count, cold_count);
-	}
 }
 
 static void receive_all(void)
@@ -1571,6 +1561,8 @@ static void receive_all(void)
 		for (i = 0; i < num_socks; i++){
 			if(opt_application_type == 3 || opt_application_type == 4)
 				forward(xsks[i]);
+			else if(opt_application_type == 6)
+				l3forward(xsks[i]);
 			else
 				receive(xsks[i]);
 		}
@@ -1755,8 +1747,8 @@ int main(int argc, char **argv)
 	{
 		const size_t page_size = 1048576 * 2;
 		const size_t num_numa_nodes = 1;
-		const size_t num_pages_to_try = 16384;
-		const size_t num_pages_to_reserve = 16384 - 2048; 
+		const size_t num_pages_to_try = umem_size;
+		const size_t num_pages_to_reserve = umem_size - umem_size/8; 
 		size_t alloc_overhead = sizeof(struct mehcached_item);
 		
 		mehcached_shm_init(page_size, num_numa_nodes, num_pages_to_try, num_pages_to_reserve);
@@ -1768,8 +1760,9 @@ int main(int argc, char **argv)
 		assert(table);
 
 
-		memset(default_value, 'A', 255);
-    	default_value[255] = '\0'; 
+		char default_value[VALUE_SIZE];
+		memset(default_value, 'A', VALUE_SIZE-1);
+    	default_value[VALUE_SIZE-1] = '\0'; 
 
 		for(size_t i =0; i< NUM_KEYS; i++)
 		{
@@ -1798,18 +1791,16 @@ int main(int argc, char **argv)
         mkdir("./logs", 0777);
     }
 
-	if(opt_burst_tp)
+
+	if(opt_debug_addr)
 	{
-		snprintf(burst_tp_file_path, sizeof(burst_tp_file_path), "./logs/%s", burst_tp_file);
-		FILE *file = fopen(burst_tp_file_path, "w");
+		snprintf(addr_file_path, sizeof(addr_file_path), "./logs/%s", addr_file);
+		FILE *file = fopen(addr_file_path, "w");
 		if (file == NULL) {
 			perror("Error opening file");
 		}
 		fclose(file);
-
-		clock_gettime(opt_clock, &start_time_burst);
 	}
-
 
 	/* Reserve memory for the umem. Use hugepages if unaligned chunk mode */
 	bufs = mmap(NULL, umem_size * opt_xsk_frame_size,
@@ -1824,7 +1815,7 @@ int main(int argc, char **argv)
 	umem = xsk_configure_umem(bufs, umem_size * opt_xsk_frame_size);
 
 	rx = true;
-	if(opt_application_type == 3 || opt_application_type == 4)
+	if(opt_application_type == 3 || opt_application_type == 4 || opt_application_type == 6)
 		tx = true;
 
 	xsk_populate_fill_ring(umem);
@@ -1847,9 +1838,6 @@ int main(int argc, char **argv)
 
 	setlocale(LC_ALL, "");
 
-	prev_time = get_nsecs();
-	start_time = prev_time;
-
 
 	/* Configure sched priority for better wake-up accuracy */
 	memset(&schparam, 0, sizeof(schparam));
@@ -1861,6 +1849,10 @@ int main(int argc, char **argv)
 		goto out;
 	}
 
+	//for address debug
+	for (int i = 0; i < MAX_UMEM_SIZE; i++) {
+        	addr_count_array[i] = 0;
+	}
 
 	receive_all();
 
@@ -1873,3 +1865,4 @@ out:
 
 	return 0;
 }
+
